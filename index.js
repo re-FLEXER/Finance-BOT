@@ -26,8 +26,8 @@ const getStatsData = async () => {
     
     let initBalance = 0;
     let pIncome = 0, pExpense = 0, pSaving = 0, wIncome = 0, wExpense = 0;
-    let iOweTotal = 0, payDebtTotal = 0; // Мої борги та їх погашення
-    let oweMeTotal = 0, getDebtTotal = 0; // Борги мені та їх повернення
+    let iOweTotal = 0, payDebtTotal = 0; 
+    let oweMeTotal = 0, getDebtTotal = 0; 
 
     allTransactions.forEach(t => {
         if (t.type === 'init_balance') {
@@ -48,11 +48,9 @@ const getStatsData = async () => {
 
     const workProfit = wIncome - wExpense;
     
-    // Поточний стан боргів (Скільки залишилось виплатити)
     const currentIOwe = iOweTotal - payDebtTotal;
     const currentOweMe = oweMeTotal - getDebtTotal;
 
-    // Реальний залишок = Початковий залишок + Доходи - Витрати - Збереження - Дав у борг (заморожено) + Мені повернули борг - Я віддав свій борг (витрата)
     const personalBalance = initBalance + pIncome - pExpense - pSaving - oweMeTotal + getDebtTotal - payDebtTotal;
 
     return {
@@ -124,7 +122,6 @@ bot.command('setbalance', async (ctx) => {
         return ctx.reply('Будь ласка, вкажи суму правильно. Наприклад: /setbalance 450.60');
     }
     
-    // Видаляємо старі записи початкового балансу, щоб не плюсувалися
     await prisma.transaction.deleteMany({ where: { type: 'init_balance' } });
     
     await prisma.transaction.create({
@@ -150,7 +147,7 @@ bot.action('cancel_reset', async (ctx) => {
     await ctx.editMessageText('Очищення скасовано.');
 });
 
-// 3. Борговий модуль (Фіксація та Погашення)
+// 3. Борговий модуль
 bot.command('debt', async (ctx) => {
     const text = ctx.message.text.replace('/debt', '').trim();
     const parts = text.split(' ');
@@ -185,7 +182,7 @@ bot.command('paydebt', async (ctx) => {
     await prisma.transaction.create({
         data: { type: 'pay_debt', amount, category: 'Погашення', description: `Віддав частину боргу`, workspace: 'Особисте' }
     });
-    await ctx.reply(`💸 Записано: ти погасив ${amount} грн свого боргу. Залишок на картці зменшено.`);
+    await ctx.reply(`💸 Записано: ти погасив ${amount} грн своего боргу. Залишок на картці зменшено.`);
 });
 
 bot.command('getdebt', async (ctx) => {
@@ -206,19 +203,19 @@ bot.on('text', async (ctx) => {
     const userId = ctx.from.id;
     const userText = ctx.message.text;
 
-    // Обробка режиму уточнення (Додано можливість ШІ змінювати тип транзакції на борги)
     if (userStates[userId] && userStates[userId].isEditing) {
         const txId = userStates[userId].txId;
         delete userStates[userId];
 
         try {
-            const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+            const model = genAI.getGenerativeModel({ model: "gemini-3.5-flash" });
             const prompt = `Користувач уточнив транзакцію: "${userText}". 
             Визнач нову type ("income", "expense", "saving", "pay_debt", "get_debt", "i_owe", "owe_me"), category та workspace ("Проєкт" або "Особисте").
             Формат JSON: {"type": "...", "category": "...", "workspace": "..."}`;
             
             const result = await model.generateContent(prompt);
-            const aiData = JSON.parse(result.response.text().trim().replace(/```json/g, '').replace(/```/g, '').trim());
+            const textResponse = result.response.text().trim().replace(/```json/g, '').replace(/```/g, '').trim();
+            const aiData = JSON.parse(textResponse);
 
             await prisma.transaction.update({
                 where: { id: txId },
@@ -227,15 +224,15 @@ bot.on('text', async (ctx) => {
 
             return ctx.reply('✅ Транзакцію та її тип успішно оновлено!');
         } catch (e) {
+            console.error('Помилка оновлення уточнення:', e);
             return ctx.reply('Не вдалося оновити транзакцію.');
         }
     }
 
-    // AI Радник
     const waitMsg = await ctx.reply('⏳ Аналізую ваші фінанси...');
     try {
         const stats = await getStatsData();
-        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+        const model = genAI.getGenerativeModel({ model: "gemini-3.5-flash" });
 
         const advisorPrompt = `
 Ти — фінансовий ментор.
@@ -247,8 +244,8 @@ bot.on('text', async (ctx) => {
 - Йому винні: ${stats.currentOweMe} грн.
 
 Запит користувача: "${userText}"
-Завдання: Дай коротку стратегічну пораду. Враховуй борги! Якщо користувач хоче зробити велику витрату, але має активні борги, обов'язково нагадай про них.
-Правило: Використовуй тільки базовий HTML (<b>, <i>).
+Завдання: Дай коротку стратегічну пораду. Враховуй борги! Якщо користувач хоче зробити витрату, але має активні борги чи від'ємний баланс, підсвіти це як ризик.
+Правило: Використовуй тільки базовий HTML (<b>, <i>). Не використовуй markdown зі зірочками.
 `;
 
         const adviceResult = await model.generateContent(advisorPrompt);
@@ -260,8 +257,9 @@ bot.on('text', async (ctx) => {
         await ctx.telegram.deleteMessage(ctx.chat.id, waitMsg.message_id);
         await ctx.replyWithHTML(`🎩 <b>ТВІЙ РАДНИК:</b>\n\n${safeResponse}`);
     } catch (err) {
-        console.error(err);
-        await ctx.reply('Помилка генерації поради ШІ.');
+        console.error('Помилка AI Радника:', err);
+        await ctx.telegram.deleteMessage(ctx.chat.id, waitMsg.message_id);
+        await ctx.reply('Вибач, сталася помилка при аналізі фінансів ШІ.');
     }
 });
 
@@ -284,7 +282,7 @@ app.post('/monobank', async (req, res) => {
     const isIncome = item.amount > 0;
 
     try {
-        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+        const model = genAI.getGenerativeModel({ model: "gemini-3.5-flash" });
         const prompt = `Проаналізуй транзакцію з Монобанку. 
         Сума: ${amount}, Опис: "${description}", Зарахування: ${isIncome}.
         
@@ -299,7 +297,8 @@ app.post('/monobank', async (req, res) => {
         Формат JSON: {"type": "...", "category": "...", "workspace": "..."}`;
 
         const result = await model.generateContent(prompt);
-        const aiData = JSON.parse(result.response.text().trim().replace(/```json/g, '').replace(/```/g, '').trim());
+        const textResponse = result.response.text().trim().replace(/```json/g, '').replace(/```/g, '').trim();
+        const aiData = JSON.parse(textResponse);
 
         const savedTx = await prisma.transaction.create({
             data: {
@@ -331,7 +330,6 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, async () => {
     console.log(`Сервер працює на порту ${PORT}`);
     
-    // Встановлюємо меню команд у Telegram
     try {
         await bot.telegram.setMyCommands([
             { command: 'stats', description: '📊 Фінансова статистика' },
