@@ -14,7 +14,7 @@ const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 // Сховище для тимчасових даних "Уточнити"
 const userStates = {};
 
-// Глобальна змінна для збереження стартового балансу в пам'яті/базі
+// Глобальна змінна для збереження стартового балансу в пам'яті
 let initialBalance = 0;
 
 // --- ТЕЛЕГРАМ ВЕБХУК НАЛАШТУВАННЯ ---
@@ -81,7 +81,34 @@ const showStats = async (ctx) => {
 
 // --- КОМАНДИ БОТА ---
 
-bot.start((ctx) => ctx.reply('Привіт! Бот активний і ready for action. Введи /stats для статистики або /help.'));
+bot.start((ctx) => ctx.reply('Привіт! Бот активний і готовий до роботи. Введи /help для списку команд або /stats для перегляду балансу.'));
+
+// Довідка по командах
+const helpMessage = `
+ℹ️ <b>СПИСОК ДОСТУПНИХ КОМАНД</b>
+━━━━━━━━━━━━━━━━━━
+
+📊 <b>Основи та Статистика:</b>
+• /stats — Переглянути поточну фінансову статистику та реальний залишок.
+• /setbalance <code>&lt;сума&gt;</code> — Встановити стартовий капітал / поточний залишок на картці.
+  <i>Приклад:</i> <code>/setbalance 15000</code>
+
+🤝 <b>Модуль Боргів (Debt Tracker):</b>
+• /debt <code>&lt;сума&gt; &lt;ім'я&gt;</code> — Записати, що ти взяв у борг (Я винен).
+  <i>Приклад:</i> <code>/debt 300 Дмитро</code>
+• /lend <code>&lt;сума&gt; &lt;ім'я&gt;</code> — Записати, що ти дав у борг (Мені винні).
+  <i>Приклад:</i> <code>/lend 150 Саша</code>
+
+🔄 <b>Керування даними:</b>
+• /reset — Повністю очистити історію транзакцій та скинути баланс (з підтвердженням).
+
+💡 <b>ШІ-Радник:</b>
+• Просто напиши боту будь-яке запитання або думку в чат (наприклад, <i>"Хочу купити кросівки за 3000 грн, що думаєш?"</i>) — ШІ проаналізує твій бюджет і надасть пораду.
+`;
+
+bot.command(['help', 'commands'], async (ctx) => {
+    await ctx.replyWithHTML(helpMessage);
+});
 
 // 1. Встановлення стартового балансу
 bot.command('setbalance', async (ctx) => {
@@ -96,7 +123,7 @@ bot.command('setbalance', async (ctx) => {
 
 // 2. Скидання бази даних (Reset DB)
 bot.command('reset', async (ctx) => {
-    await ctx.reply('⚠️ Ти дійсно хочеш повнісю очистити всі транзакції?', Markup.inlineKeyboard([
+    await ctx.reply('⚠️ Ти дійсно хочеш повністю очистити всі транзакції?', Markup.inlineKeyboard([
         [Markup.button.callback('✅ Так, очистити все', 'confirm_reset'), Markup.button.callback('❌ Скасувати', 'cancel_reset')]
     ]));
 });
@@ -113,7 +140,6 @@ bot.action('cancel_reset', async (ctx) => {
 
 // 3. Борговий модуль
 bot.command('debt', async (ctx) => {
-    // Взяв у борг: /debt 500 Петро
     const text = ctx.message.text.replace('/debt', '').trim();
     const parts = text.split(' ');
     const amount = parseFloat(parts[0]);
@@ -128,7 +154,6 @@ bot.command('debt', async (ctx) => {
 });
 
 bot.command('lend', async (ctx) => {
-    // Дав у борг: /lend 200 Олег
     const text = ctx.message.text.replace('/lend', '').trim();
     const parts = text.split(' ');
     const amount = parseFloat(parts[0]);
@@ -252,7 +277,6 @@ app.post('/monobank', async (req, res) => {
             }
         });
 
-        const icon = aiData.type === 'income' ? '🟢' : aiData.type === 'saving' ? '🟡' : '🔴';
         const msg = `🏦 <b>Monobank</b> | Автоматично\n\n` +
                     `📦 <b>Простір:</b> ${aiData.workspace}\n` +
                     `🏷 <b>Категорія:</b> ${aiData.category}\n\n` +
@@ -273,6 +297,20 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, async () => {
     console.log(`Сервер працює на порту ${PORT}`);
     
+    // Встановлюємо меню команд у Telegram
+    try {
+        await bot.telegram.setMyCommands([
+            { command: 'stats', description: '📊 Фінансова статистика' },
+            { command: 'setbalance', description: '💵 Встановити стартовий баланс' },
+            { command: 'debt', description: '🤝 Взяв у борг (Я винен)' },
+            { command: 'lend', description: '🤝 Дав у борг (Мені винні)' },
+            { command: 'help', description: 'ℹ️ Список усіх команд та інструкція' },
+            { command: 'reset', description: '⚠️ Очистити всі дані' }
+        ]);
+    } catch (err) {
+        console.error('Помилка встановлення меню команд:', err);
+    }
+
     // Реєструємо Webhook для Telegram при кожному запуску
     if (process.env.RENDER_EXTERNAL_URL) {
         const fullWebhookUrl = `${process.env.RENDER_EXTERNAL_URL}${WEBHOOK_PATH}`;
