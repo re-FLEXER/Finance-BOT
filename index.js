@@ -24,7 +24,7 @@ const getStatsData = async () => {
     const allTransactions = await prisma.transaction.findMany();
     
     let initBalance = 0;
-    let initSaving = 0; // Початкові збереження (Банка до старту бота)
+    let initSaving = 0; 
     let pIncome = 0, pExpense = 0, pSaving = 0, wIncome = 0, wExpense = 0;
     let iOweTotal = 0, payDebtTotal = 0; 
     let oweMeTotal = 0, getDebtTotal = 0; 
@@ -53,17 +53,26 @@ const getStatsData = async () => {
     const currentIOwe = iOweTotal - payDebtTotal;
     const currentOweMe = oweMeTotal - getDebtTotal;
     
-    const totalSaving = initSaving + pSaving; // Всі гроші на банці
+    const totalSaving = initSaving + pSaving; 
 
-    // Реальний залишок на картці (не враховує initSaving, але віднімає поточні pSaving)
     const personalBalance = initBalance + pIncome - pExpense - pSaving - oweMeTotal + getDebtTotal - payDebtTotal;
-    
-    // Загальний капітал = Гроші на картці + Гроші на банці
     const totalCapital = personalBalance + totalSaving;
 
+    // Додаємо жорстке округлення до 2 знаків після коми для вирішення проблеми з дробовими числами
+    const round2 = (num) => Number(num.toFixed(2));
+
     return {
-        initBalance, pIncome, pExpense, totalSaving, wIncome, wExpense,
-        currentIOwe, currentOweMe, workProfit, personalBalance, totalCapital
+        initBalance: round2(initBalance), 
+        pIncome: round2(pIncome), 
+        pExpense: round2(pExpense), 
+        totalSaving: round2(totalSaving), 
+        wIncome: round2(wIncome), 
+        wExpense: round2(wExpense),
+        currentIOwe: round2(currentIOwe), 
+        currentOweMe: round2(currentOweMe), 
+        workProfit: round2(workProfit), 
+        personalBalance: round2(personalBalance), 
+        totalCapital: round2(totalCapital)
     };
 };
 
@@ -218,7 +227,8 @@ bot.on('text', async (ctx) => {
             Визнач нову type ("income", "expense", "saving", "pay_debt", "get_debt", "i_owe", "owe_me"), category та workspace ("Проєкт" або "Особисте").
             Формат JSON: {"type": "...", "category": "...", "workspace": "..."}`;
             const result = await model.generateContent(prompt);
-            const aiData = JSON.parse(result.response.text().trim().replace(/```json/g, '').replace(/```/g, '').trim());
+            const textResponse = result.response.text().trim().replace(/```json/g, '').replace(/```/g, '').trim();
+            const aiData = JSON.parse(textResponse);
             await prisma.transaction.update({ where: { id: txId }, data: { type: aiData.type, category: aiData.category, workspace: aiData.workspace, description: userText } });
             return ctx.reply('✅ Транзакцію та її тип успішно оновлено!');
         } catch (e) {
@@ -288,7 +298,8 @@ app.post('/monobank', async (req, res) => {
         Формат JSON: {"type": "...", "category": "...", "workspace": "..."}`;
 
         const result = await model.generateContent(prompt);
-        const aiData = JSON.parse(result.response.text().trim().replace(/```json/g, '').replace(/```/g, '').trim());
+        const textResponse = result.response.text().trim().replace(/```json/g, '').replace(/```/g, '').trim();
+        const aiData = JSON.parse(textResponse);
 
         const savedTx = await prisma.transaction.create({
             data: { type: aiData.type, amount: amount, category: aiData.category, description: description, workspace: aiData.workspace }
