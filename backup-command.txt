@@ -1,0 +1,5 @@
+Якщо знадобиться відкотитися: виконай у терміналі дві команди:
+
+Bash
+git reset --hard v1.0-working
+git push origin main --force
