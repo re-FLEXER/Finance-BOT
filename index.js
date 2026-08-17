@@ -11,7 +11,6 @@ const prisma = new PrismaClient();
 const bot = new Telegraf(process.env.BOT_TOKEN);
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-// Сховище для тимчасових даних "Уточнити"
 const userStates = {};
 
 // --- ТЕЛЕГРАМ ВЕБХУК НАЛАШТУВАННЯ ---
@@ -49,12 +48,12 @@ const getStatsData = async () => {
     });
 
     const workProfit = wIncome - wExpense;
-    
     const currentIOwe = iOweTotal - payDebtTotal;
     const currentOweMe = oweMeTotal - getDebtTotal;
 
-    const personalBalance = initBalance + pIncome - pExpense - pSaving - oweMeTotal + getDebtTotal - payDebtTotal;
-    const totalCapital = personalBalance + pSaving; // Загальний капітал (картка + збереження/банки/готівка)
+    // ВИПРАВЛЕНО: Доходи та витрати з проєктів (ІТ, дизайн) плюсуються до реального залишку картки
+    const personalBalance = initBalance + (pIncome + wIncome) - (pExpense + wExpense) - pSaving - oweMeTotal + getDebtTotal - payDebtTotal;
+    const totalCapital = personalBalance + pSaving; 
 
     return {
         initBalance, pIncome, pExpense, pSaving, wIncome, wExpense,
@@ -91,7 +90,6 @@ const showStats = async (ctx) => {
 };
 
 // --- КОМАНДИ БОТА ---
-
 bot.start((ctx) => ctx.reply('Привіт! Бот активний. Введи /help для списку команд або /stats для перегляду балансу.'));
 
 const helpMessage = `
@@ -101,7 +99,7 @@ const helpMessage = `
 📊 <b>Основи та Статистика:</b>
 • /stats — Переглянути фінансову статистику та реальний залишок.
 • /setbalance <code>&lt;сума&gt;</code> — Встановити початковий залишок (точка відліку на картці).
-• /sync <code>&lt;сума&gt;</code> — <b>Синхронізувати баланс</b>. Вирівнює залишок бота з карткою без втрати історії.
+• /sync <code>&lt;сума&gt;</code> — <b>Синхронізувати баланс</b>. Вирівнює баланс бота з реальною карткою.
 • /setsavings <code>&lt;сума&gt;</code> — Синхронізувати суму збережень (Банка/Готівка).
 
 🤝 <b>Модуль Боргів (Debt Tracker):</b>
@@ -121,7 +119,6 @@ bot.command(['help', 'commands'], async (ctx) => {
     await ctx.replyWithHTML(helpMessage);
 });
 
-// 1. Встановлення початкового залишку
 bot.command('setbalance', async (ctx) => {
     const args = ctx.message.text.split(' ');
     const amount = parseFloat(args[1]);
@@ -134,22 +131,23 @@ bot.command('setbalance', async (ctx) => {
     await ctx.reply(`✅ Початковий залишок успішно зафіксовано: ${amount} грн.`);
 });
 
-// Розумна синхронізація балансу
 bot.command('sync', async (ctx) => {
     const args = ctx.message.text.split(' ');
     const realAmount = parseFloat(args[1]);
-    
     if (isNaN(realAmount)) return ctx.reply('⚠️ Формат: /sync <сума на картці>. Наприклад: /sync 99.60');
 
     const allTransactions = await prisma.transaction.findMany();
     let initBalanceId = null;
-    let pIncome = 0, pExpense = 0, pSaving = 0;
+    let pIncome = 0, pExpense = 0, pSaving = 0, wIncome = 0, wExpense = 0;
     let payDebtTotal = 0, oweMeTotal = 0, getDebtTotal = 0;
 
     allTransactions.forEach(t => {
         if (t.type === 'init_balance') {
             initBalanceId = t.id;
-        } else if (t.workspace !== 'Проєкт') {
+        } else if (t.workspace === 'Проєкт') {
+            if (t.type === 'income') wIncome += t.amount;
+            if (t.type === 'expense') wExpense += t.amount;
+        } else {
             if (t.type === 'income') pIncome += t.amount;
             if (t.type === 'expense') pExpense += t.amount;
             if (t.type === 'saving') pSaving += t.amount;
@@ -159,61 +157,40 @@ bot.command('sync', async (ctx) => {
         }
     });
 
-    const newInitBalance = realAmount - pIncome + pExpense + pSaving + oweMeTotal - getDebtTotal + payDebtTotal;
+    const newInitBalance = realAmount - (pIncome + wIncome) + (pExpense + wExpense) + pSaving + oweMeTotal - getDebtTotal + payDebtTotal;
 
     if (initBalanceId) {
-        await prisma.transaction.update({
-            where: { id: initBalanceId },
-            data: { amount: newInitBalance }
-        });
+        await prisma.transaction.update({ where: { id: initBalanceId }, data: { amount: newInitBalance } });
     } else {
-        await prisma.transaction.create({
-            data: { type: 'init_balance', amount: newInitBalance, category: 'Синхронізація', description: 'Автоматичне вирівнювання', workspace: 'Особисте' }
-        });
+        await prisma.transaction.create({ data: { type: 'init_balance', amount: newInitBalance, category: 'Синхронізація', workspace: 'Особисте' } });
     }
-
     await ctx.reply(`✅ Синхронізовано! Математику вирівняно під ${realAmount} грн.\nСтатистика витрат та доходів повністю збережена.`);
 });
 
-// Встановлення / Синхронізація збережень (Банка/Кеш)
 bot.command('setsavings', async (ctx) => {
     const args = ctx.message.text.split(' ');
     const targetAmount = parseFloat(args[1]);
-    
     if (isNaN(targetAmount)) return ctx.reply('⚠️ Формат: /setsavings <сума>. Наприклад: /setsavings 5000');
 
-    const allTransactions = await prisma.transaction.findMany({
-        where: { OR: [{ type: 'saving' }, { type: 'init_saving' }] }
-    });
-    
+    const allTransactions = await prisma.transaction.findMany({ where: { OR: [{ type: 'saving' }, { type: 'init_saving' }] } });
     let currentDynamicSavings = 0;
     let initSavingId = null;
 
     allTransactions.forEach(t => {
-        if (t.type === 'init_saving') {
-            initSavingId = t.id;
-        } else if (t.type === 'saving') {
-            currentDynamicSavings += t.amount;
-        }
+        if (t.type === 'init_saving') initSavingId = t.id;
+        else if (t.type === 'saving') currentDynamicSavings += t.amount;
     });
 
     const newInitSaving = targetAmount - currentDynamicSavings;
 
     if (initSavingId) {
-        await prisma.transaction.update({
-            where: { id: initSavingId },
-            data: { amount: newInitSaving }
-        });
+        await prisma.transaction.update({ where: { id: initSavingId }, data: { amount: newInitSaving } });
     } else {
-        await prisma.transaction.create({
-            data: { type: 'init_saving', amount: newInitSaving, category: 'Стартове збереження', description: 'Синхронізація скарбнички', workspace: 'Особисте' }
-        });
+        await prisma.transaction.create({ data: { type: 'init_saving', amount: newInitSaving, category: 'Стартове збереження', workspace: 'Особисте' } });
     }
-
-    await ctx.reply(`✅ Збереження успішно синхронізовано! Тепер у скарбничці (Банка/Кеш): ${targetAmount} грн.`);
+    await ctx.reply(`✅ Збереження успішно синхронізовано! Тепер у скарбничці: ${targetAmount} грн.`);
 });
 
-// 2. Скидання бази даних
 bot.command('reset', async (ctx) => {
     await ctx.reply('⚠️ Ти дійсно хочеш повністю очистити всі транзакції та борги?', Markup.inlineKeyboard([
         [Markup.button.callback('✅ Так, очистити все', 'confirm_reset'), Markup.button.callback('❌ Скасувати', 'cancel_reset')]
@@ -224,19 +201,14 @@ bot.action('confirm_reset', async (ctx) => {
     await prisma.transaction.deleteMany({});
     await ctx.editMessageText('🗑 База даних повністю очищена! Вкажи новий початковий залишок через /setbalance.');
 });
+bot.action('cancel_reset', async (ctx) => { await ctx.editMessageText('Очищення скасовано.'); });
 
-bot.action('cancel_reset', async (ctx) => {
-    await ctx.editMessageText('Очищення скасовано.');
-});
-
-// 3. Борговий модуль
 bot.command('debt', async (ctx) => {
     const text = ctx.message.text.replace('/debt', '').trim();
     const parts = text.split(' ');
     const amount = parseFloat(parts[0]);
     const name = parts.slice(1).join(' ') || 'Хтось';
     if (isNaN(amount)) return ctx.reply('Формат: /debt <сума> <хто дав>. Наприклад: /debt 500 Петро');
-
     await prisma.transaction.create({ data: { type: 'i_owe', amount, category: 'Пасив', description: `Взято у борг від ${name}`, workspace: 'Особисте' } });
     await ctx.reply(`🤝 Зафіксовано пасив: ти винен ${amount} грн (${name}).`);
 });
@@ -247,7 +219,6 @@ bot.command('lend', async (ctx) => {
     const amount = parseFloat(parts[0]);
     const name = parts.slice(1).join(' ') || 'Хтось';
     if (isNaN(amount)) return ctx.reply('Формат: /lend <сума> <кому дав>. Наприклад: /lend 200 Олег');
-
     await prisma.transaction.create({ data: { type: 'owe_me', amount, category: 'Актив', description: `Дано у борг ${name}`, workspace: 'Особисте' } });
     await ctx.reply(`🤝 Зафіксовано актив (витрата з залишку): тобі винні ${amount} грн (${name}).`);
 });
@@ -255,7 +226,6 @@ bot.command('lend', async (ctx) => {
 bot.command('paydebt', async (ctx) => {
     const amount = parseFloat(ctx.message.text.replace('/paydebt', '').trim());
     if (isNaN(amount)) return ctx.reply('Формат: /paydebt <сума>. Наприклад: /paydebt 5000');
-
     await prisma.transaction.create({ data: { type: 'pay_debt', amount, category: 'Погашення', description: `Віддав частину боргу`, workspace: 'Особисте' } });
     await ctx.reply(`💸 Записано: ти погасив ${amount} грн свого боргу. Залишок на картці зменшено.`);
 });
@@ -263,7 +233,6 @@ bot.command('paydebt', async (ctx) => {
 bot.command('getdebt', async (ctx) => {
     const amount = parseFloat(ctx.message.text.replace('/getdebt', '').trim());
     if (isNaN(amount)) return ctx.reply('Формат: /getdebt <сума>. Наприклад: /getdebt 2000');
-
     await prisma.transaction.create({ data: { type: 'get_debt', amount, category: 'Повернення', description: `Мені повернули борг`, workspace: 'Особисте' } });
     await ctx.reply(`📥 Записано: тобі повернули ${amount} грн боргу. Залишок на картці збільшено.`);
 });
@@ -286,31 +255,16 @@ bot.on('text', async (ctx) => {
 Користувач написав / Опис транзакції: "${userText}".
 
 ТИ ПОВИНЕН ОБРАТИ TYPE ТІЛЬКИ З ЦЬОГО СПИСКУ ЗА СУВОРИМИ ПРАВИЛАМИ:
-
-1. Переміщення активів -> type: "saving"
-- Зняття готівки, обмін в готівку, купівля валюти (долари, євро).
-- Переказ на власну банку, депозит, купівля військових облігацій, крипти.
-(Логіка: гроші не витрачені, вони просто змінили форму або перекладені в іншу кишеню).
-
-2. Справжні витрати -> type: "expense"
-- Покупки, їжа, підписки, квитки в кіно, транспорт.
-- Витрати на дизайн, рамки для постерів.
-
-3. Справжній дохід -> type: "income"
-- Зарплата в IT, дохід від продажу постерів, подарунки, кешбек.
-
-4. Логіка боргів (4 варіанти):
-- "i_owe" -> Користувач взяв гроші у борг (збільшення пасиву).
-- "owe_me" -> Користувач позичив свої гроші комусь або заплатив за друга (збільшення активу).
-- "pay_debt" -> Користувач погашає свій борг (віддає гроші кредитору).
-- "get_debt" -> Користувачу повертають борг, який він давав раніше.
+1. Переміщення активів -> type: "saving" (Зняття готівки, переказ на свою банку, крипта).
+2. Справжні витрати -> type: "expense" (Покупки, їжа, підписки).
+3. Справжній дохід -> type: "income" (Зарплата, дохід від продажу).
+4. Логіка боргів: "i_owe" (взяв борг), "owe_me" (дав борг), "pay_debt" (віддаєш свій борг), "get_debt" (тобі повертають).
 
 ПРАВИЛА ДЛЯ WORKSPACE ("Проєкт" або "Особисте"):
-- "Проєкт": Все, що стосується IT, Node.js, Telegram-ботів, дизайну постерів (poster.baza) та фрілансу.
-- "Особисте": Спортзал, кіно, побут, власні борги та переміщення готівки.
+- "Проєкт": Все, що стосується IT, Node.js, Telegram-ботів, poster.baza та фрілансу.
+- "Особисте": Спортзал, кіно, побут, переміщення готівки.
 
-Визнач type, category (коротко, 1-2 слова) та workspace.
-Формат JSON: {"type": "...", "category": "...", "workspace": "..."}`;
+Визнач type, category (коротко, 1-2 слова) та workspace. Формат JSON: {"type": "...", "category": "...", "workspace": "..."}`;
             
             const result = await model.generateContent(prompt);
             const textResponse = result.response.text().trim().replace(/```json/g, '').replace(/```/g, '').trim();
@@ -321,7 +275,7 @@ bot.on('text', async (ctx) => {
                 data: { type: aiData.type, category: aiData.category, workspace: aiData.workspace, description: userText }
             });
 
-            return ctx.reply('✅ Транзакцію та її тип успішно оновлено за новими правилами!');
+            return ctx.reply('✅ Транзакцію та її тип успішно оновлено!');
         } catch (e) {
             console.error('Помилка оновлення уточнення:', e);
             return ctx.reply('Не вдалося оновити транзакцію.');
@@ -364,7 +318,6 @@ bot.on('text', async (ctx) => {
     }
 });
 
-// Кнопка Уточнити
 bot.action(/edit_(\d+)/, async (ctx) => {
     const txId = parseInt(ctx.match[1]);
     userStates[ctx.from.id] = { isEditing: true, txId: txId };
@@ -373,7 +326,7 @@ bot.action(/edit_(\d+)/, async (ctx) => {
 
 // --- ВЕБХУК МОНОБАНКУ ---
 app.post('/monobank', async (req, res) => {
-    res.status(200).send('OK');
+    res.status(200).send('OK'); 
     const data = req.body.data;
     if (!data || !data.statementItem) return;
 
@@ -381,39 +334,28 @@ app.post('/monobank', async (req, res) => {
     const amount = Math.abs(item.amount) / 100;
     const description = item.description || 'Транзакція Monobank';
     const isIncome = item.amount > 0;
+    const monoId = item.id;
 
     try {
+        // ВИПРАВЛЕНО: Перевірка на дублікати (якщо такий monoId вже є, ігноруємо)
+        const existingTx = await prisma.transaction.findFirst({ where: { monoId: monoId } });
+        if (existingTx) return;
+
         const model = genAI.getGenerativeModel({ model: "gemini-3.5-flash" });
         const prompt = `Проаналізуй фінансову транзакцію. 
-Опис транзакції: "${description}".
-Сума: ${amount}. Зарахування: ${isIncome}.
+Опис: "${description}". Сума: ${amount}. Зарахування: ${isIncome}.
 
 ТИ ПОВИНЕН ОБРАТИ TYPE ТІЛЬКИ З ЦЬОГО СПИСКУ ЗА СУВОРИМИ ПРАВИЛАМИ:
-
-1. Переміщення активів -> type: "saving"
-- Зняття готівки, обмін в готівку, купівля валюти (долари, євро).
-- Переказ на власну банку, депозит, купівля військових облігацій, крипти.
-(Логіка: гроші не витрачені, вони просто змінили форму або перекладені в іншу кишеню).
-
-2. Справжні витрати -> type: "expense"
-- Покупки, їжа, підписки, квитки в кіно, транспорт.
-- Витрати на дизайн, рамки для постерів.
-
-3. Справжній дохід -> type: "income"
-- Зарплата в IT, дохід від продажу постерів, подарунки, кешбек.
-
-4. Логіка боргів (4 варіанти):
-- "i_owe" -> Користувач взяв гроші у борг (збільшення пасиву).
-- "owe_me" -> Користувач позичив свої гроші комусь або заплатив за друга (збільшення активу).
-- "pay_debt" -> Користувач погашає свій борг (віддає гроші кредитору).
-- "get_debt" -> Користувачу повертають борг, який він давав раніше.
+1. Переміщення активів -> type: "saving" (Зняття готівки, переказ на свою банку, крипта).
+2. Справжні витрати -> type: "expense" (Покупки, їжа, підписки).
+3. Справжній дохід -> type: "income" (Зарплата, дохід від продажу).
+4. Логіка боргів: "i_owe" (взяв борг), "owe_me" (дав борг), "pay_debt" (віддаєш свій борг), "get_debt" (тобі повертають).
 
 ПРАВИЛА ДЛЯ WORKSPACE ("Проєкт" або "Особисте"):
-- "Проєкт": Все, що стосується IT, Node.js, Telegram-ботів, дизайну постерів (poster.baza) та фрілансу.
-- "Особисте": Спортзал, кіно, побут, власні борги та переміщення готівки.
+- "Проєкт": Все, що стосується IT, Node.js, Telegram-ботів, poster.baza та фрілансу.
+- "Особисте": Спортзал, кіно, побут, переміщення готівки.
 
-Визнач type, category (коротко, 1-2 слова) та workspace.
-Формат JSON: {"type": "...", "category": "...", "workspace": "..."}`;
+Визнач type, category (коротко, 1-2 слова) та workspace. Формат JSON: {"type": "...", "category": "...", "workspace": "..."}`;
 
         const result = await model.generateContent(prompt);
         const textResponse = result.response.text().trim().replace(/```json/g, '').replace(/```/g, '').trim();
@@ -421,6 +363,7 @@ app.post('/monobank', async (req, res) => {
 
         const savedTx = await prisma.transaction.create({
             data: {
+                monoId: monoId, // Зберігаємо ID від Монобанку
                 type: aiData.type,
                 amount: amount,
                 category: aiData.category,
@@ -449,6 +392,7 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, async () => {
     console.log(`Сервер працює на порту ${PORT}`);
     
+    // ПОВЕРНУТО: Реєстрація меню підказок в самому Telegram
     try {
         await bot.telegram.setMyCommands([
             { command: 'stats', description: '📊 Фінансова статистика' },

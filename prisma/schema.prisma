@@ -16,4 +16,5 @@ model Transaction {
   description String?  
   workspace   String   @default("Особисте") // "Особисте" або "Проєкт"
   createdAt   DateTime @default(now())
+  monoId      String?
 }
