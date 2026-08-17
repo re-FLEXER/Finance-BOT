@@ -32,6 +32,8 @@ const getStatsData = async () => {
     allTransactions.forEach(t => {
         if (t.type === 'init_balance') {
             initBalance += t.amount;
+        } else if (t.type === 'init_saving') {
+            pSaving += t.amount;
         } else if (t.workspace === 'Проєкт') {
             if (t.type === 'income') wIncome += t.amount;
             if (t.type === 'expense') wExpense += t.amount;
@@ -99,7 +101,8 @@ const helpMessage = `
 📊 <b>Основи та Статистика:</b>
 • /stats — Переглянути фінансову статистику та реальний залишок.
 • /setbalance <code>&lt;сума&gt;</code> — Встановити початковий залишок (точка відліку на картці).
-• /sync <code>&lt;сума&gt;</code> — <b>Синхронізувати баланс</b>. Вирівнює баланс бота з реальною карткою без втрати історії витрат.
+• /sync <code>&lt;сума&gt;</code> — <b>Синхронізувати баланс</b>. Вирівнює залишок бота з карткою без втрати історії.
+• /setsavings <code>&lt;сума&gt;</code> — Синхронізувати суму збережень (Банка/Готівка).
 
 🤝 <b>Модуль Боргів (Debt Tracker):</b>
 • /debt <code>&lt;сума&gt; &lt;ім'я&gt;</code> — Зафіксувати, що ти взяв у борг (Пасив).
@@ -170,6 +173,44 @@ bot.command('sync', async (ctx) => {
     }
 
     await ctx.reply(`✅ Синхронізовано! Математику вирівняно під ${realAmount} грн.\nСтатистика витрат та доходів повністю збережена.`);
+});
+
+// Встановлення / Синхронізація збережень (Банка/Кеш)
+bot.command('setsavings', async (ctx) => {
+    const args = ctx.message.text.split(' ');
+    const targetAmount = parseFloat(args[1]);
+    
+    if (isNaN(targetAmount)) return ctx.reply('⚠️ Формат: /setsavings <сума>. Наприклад: /setsavings 5000');
+
+    const allTransactions = await prisma.transaction.findMany({
+        where: { OR: [{ type: 'saving' }, { type: 'init_saving' }] }
+    });
+    
+    let currentDynamicSavings = 0;
+    let initSavingId = null;
+
+    allTransactions.forEach(t => {
+        if (t.type === 'init_saving') {
+            initSavingId = t.id;
+        } else if (t.type === 'saving') {
+            currentDynamicSavings += t.amount;
+        }
+    });
+
+    const newInitSaving = targetAmount - currentDynamicSavings;
+
+    if (initSavingId) {
+        await prisma.transaction.update({
+            where: { id: initSavingId },
+            data: { amount: newInitSaving }
+        });
+    } else {
+        await prisma.transaction.create({
+            data: { type: 'init_saving', amount: newInitSaving, category: 'Стартове збереження', description: 'Синхронізація скарбнички', workspace: 'Особисте' }
+        });
+    }
+
+    await ctx.reply(`✅ Збереження успішно синхронізовано! Тепер у скарбничці (Банка/Кеш): ${targetAmount} грн.`);
 });
 
 // 2. Скидання бази даних
@@ -412,6 +453,7 @@ app.listen(PORT, async () => {
         await bot.telegram.setMyCommands([
             { command: 'stats', description: '📊 Фінансова статистика' },
             { command: 'sync', description: '🔄 Синхронізувати баланс з карткою' },
+            { command: 'setsavings', description: '🟡 Встановити суму збережень' },
             { command: 'setbalance', description: '💵 Встановити початковий залишок' },
             { command: 'debt', description: '🤝 Взяв у борг (Пасив)' },
             { command: 'lend', description: '🤝 Дав у борг (Актив)' },
