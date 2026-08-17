@@ -53,7 +53,7 @@ const getStatsData = async () => {
     const currentOweMe = oweMeTotal - getDebtTotal;
 
     // Від картки віднімаються ТІЛЬКИ фізичні перекази на банку (pSaving)
-    const personalBalance = initBalance + (pIncome + wIncome) - (pExpense + wExpense) - pSaving - oweMeTotal + getDebtTotal - payDebtTotal;
+    const personalBalance = initBalance + (pIncome + wIncome) - (pExpense + wExpense) - oweMeTotal + getDebtTotal - payDebtTotal;
     
     // Збираємо всі збереження разом (стартові + поповнення)
     const totalSavings = initSaving + pSaving; 
