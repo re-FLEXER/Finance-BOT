@@ -24,6 +24,7 @@ const getStatsData = async () => {
     const allTransactions = await prisma.transaction.findMany();
     
     let initBalance = 0;
+    let initSaving = 0; // Додана змінна
     let pIncome = 0, pExpense = 0, pSaving = 0, wIncome = 0, wExpense = 0;
     let iOweTotal = 0, payDebtTotal = 0; 
     let oweMeTotal = 0, getDebtTotal = 0; 
@@ -32,14 +33,14 @@ const getStatsData = async () => {
         if (t.type === 'init_balance') {
             initBalance += t.amount;
         } else if (t.type === 'init_saving') {
-            pSaving += t.amount;
+            initSaving += t.amount; // Тут іде стартова сума
         } else if (t.workspace === 'Проєкт') {
             if (t.type === 'income') wIncome += t.amount;
             if (t.type === 'expense') wExpense += t.amount;
         } else {
             if (t.type === 'income') pIncome += t.amount;
             if (t.type === 'expense') pExpense += t.amount;
-            if (t.type === 'saving') pSaving += t.amount;
+            if (t.type === 'saving') pSaving += t.amount; // Виправлено назад на pSaving
             if (t.type === 'i_owe') iOweTotal += t.amount;
             if (t.type === 'pay_debt') payDebtTotal += t.amount;
             if (t.type === 'owe_me') oweMeTotal += t.amount;
@@ -51,12 +52,17 @@ const getStatsData = async () => {
     const currentIOwe = iOweTotal - payDebtTotal;
     const currentOweMe = oweMeTotal - getDebtTotal;
 
-    // ВИПРАВЛЕНО: Доходи та витрати з проєктів (ІТ, дизайн) плюсуються до реального залишку картки
+    // Від картки віднімаються ТІЛЬКИ фізичні перекази на банку (pSaving)
     const personalBalance = initBalance + (pIncome + wIncome) - (pExpense + wExpense) - pSaving - oweMeTotal + getDebtTotal - payDebtTotal;
-    const totalCapital = personalBalance + pSaving; 
+    
+    // Збираємо всі збереження разом (стартові + поповнення)
+    const totalSavings = initSaving + pSaving; 
+    
+    // Загальний капітал (Картка + Банка)
+    const totalCapital = personalBalance + totalSavings; 
 
     return {
-        initBalance, pIncome, pExpense, pSaving, wIncome, wExpense,
+        initBalance, pIncome, pExpense, pSaving: totalSavings, wIncome, wExpense,
         currentIOwe, currentOweMe, workProfit, personalBalance, totalCapital
     };
 };
