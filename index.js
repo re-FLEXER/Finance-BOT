@@ -205,8 +205,10 @@ bot.command('reset', async (ctx) => {
 
 bot.action('confirm_reset', async (ctx) => {
     await prisma.transaction.deleteMany({});
-    await ctx.editMessageText('🗑 База даних повністю очищена! Вкажи новий початковий залишок через /setbalance.');
+    await prisma.chatHistory.deleteMany({}); // <-- Додано очищення історії
+    await ctx.editMessageText('🗑 База даних та історія чату повністю очищені! Вкажи новий початковий залишок через /setbalance.');
 });
+
 bot.action('cancel_reset', async (ctx) => { await ctx.editMessageText('Очищення скасовано.'); });
 
 bot.command('debt', async (ctx) => {
@@ -357,8 +359,6 @@ bot.on('text', async (ctx) => {
         const history = Array.isArray(rawHistory) ? rawHistory : [];
 
         console.log(`📜 Завантажено елементів історії для Gemini: ${history.length}`);
-
-        const model = genAI.getGenerativeModel({ model: "gemini-3.5-flash" });
 
         const systemInstruction = `
 Ти — фінансовий ментор та аналітик.
@@ -607,6 +607,9 @@ ${categoriesText ? `📂 **Категорії витрат:**\n${categoriesText}
 ${aiAnalysis}`;
 
         await bot.telegram.sendMessage(process.env.MY_CHAT_ID, reportMessage, { parse_mode: 'Markdown' });
+
+        // Зберігаємо вечірній аналіз в історію чату, щоб Gemini пам'ятала своє запитання
+        await saveChatMessage(process.env.MY_CHAT_ID, 'model', reportMessage);
     } catch (error) {
         console.error('Помилка відправки авто-звіту:', error);
     }
