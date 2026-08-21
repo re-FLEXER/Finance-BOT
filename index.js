@@ -1,5 +1,6 @@
 require('dotenv').config();
 const express = require('express');
+const cron = require('node-cron');
 const { Telegraf, Markup } = require('telegraf');
 const { PrismaClient } = require('@prisma/client');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
@@ -394,6 +395,22 @@ app.post('/monobank', async (req, res) => {
 
 // --- СТАРТ СЕРВЕРА ТА РЕЄСТРАЦІЯ ВЕБХУКУ ---
 const PORT = process.env.PORT || 3000;
+app.get('/ping', (req, res) => {
+    res.status(200).send('OK');
+});
+
+// --- АВТОМАТИЧНИЙ ЩОДЕННИЙ ЗВІТ (Cron Job) ---
+cron.schedule('59 23 * * *', async () => {
+    console.log('⏰ Запуск вечірнього звіту...');
+    try {
+        await bot.telegram.sendMessage(process.env.MY_CHAT_ID, '🌙 Тест: Авто-звіт о 23:59 працює!');
+    }   catch (error) {
+            console.error('Помилка відправки авто-звіту:', error);
+    }
+ }, {
+    timezone: "Europe/Kyiv"
+});
+
 app.listen(PORT, async () => {
     console.log(`Сервер працює на порту ${PORT}`);
     
