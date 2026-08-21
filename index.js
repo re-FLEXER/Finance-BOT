@@ -377,14 +377,14 @@ bot.on('text', async (ctx) => {
 `;
 
         // Ініціалізація чату
-        // 1. Правильна ініціалізація моделі з systemInstruction
-        const model = genAI.getGenerativeModel({ 
+       // 1. Ініціалізуємо модель з іншою назвою змінної (advisorModel)
+        const advisorModel = genAI.getGenerativeModel({ 
             model: "gemini-3.5-flash",
             systemInstruction: systemInstruction 
         });
 
-        // 2. Ініціалізація чату суто з історією
-        const chat = model.startChat({
+        // 2. Ініціалізація чату
+        const chat = advisorModel.startChat({
             history: history
         });
 
