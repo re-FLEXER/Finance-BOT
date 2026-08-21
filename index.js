@@ -494,13 +494,18 @@ async function generateDailyAiAnalysis(dailyData) {
 
 }
     
-
-
 // --- АВТОМАТИЧНИЙ ЩОДЕННИЙ ЗВІТ (Cron Job) ---
-cron.schedule('59 23 * * *', async () => {
+cron.schedule('41 17 * * *', async () => {
     console.log('⏰ Запуск вечірнього звіту...');
     try {
         const data = await getDailyReportData();
+
+        //Форматуємо поточну дату (наприклад: "21 серпня 2026")
+        const todayFormatted = new Date().toLocaleDateString('uk-UA', {
+            day: 'numeric',
+            month: 'long',
+            year: 'numeric'
+        });
 
         let categoriesText = '';
         for (const [cat, sum] of Object.entries(data.categoryExpenses)) {
@@ -509,17 +514,17 @@ cron.schedule('59 23 * * *', async () => {
 
         const aiAnalysis = await generateDailyAiAnalysis(data);
         const reportMessage = 
-        `🌙 **ФІНАНСОВИЙ ПІДСУМОК ДНЯ**
-        ──────────────────
-        🟢 **Доходи за день:** +${data.dayIncome.toFixed(2)} грн
-        🔴 **Витрати за день:** -${data.dayExpense.toFixed(2)} грн
+`🌙 **ФІНАНСОВИЙ ПІДСУМОК ДНЯ — ${todayFormatted}**
+──────────────────
+🟢 **Доходи за день:** +${data.dayIncome.toFixed(2)} грн
+🔴 **Витрати за день:** -${data.dayExpense.toFixed(2)} грн
 
-        ${categoriesText ? `📂 **Категорії витрат:**\n${categoriesText}` : '👌 Сьогодні витрат не було!\n'}
-        💳 **Реальний залишок (Картка):** ${data.realBalance.toFixed(2)} грн
-        💰 **Загальний капітал:** ${data.totalCapital.toFixed(2)} грн
-        ──────────────────
-        🤖 **AI-Аналітик:**
-        ${aiAnalysis}`;
+${categoriesText ? `📂 **Категорії витрат:**\n${categoriesText}` : '👌 Сьогодні витрат не було!\n'}
+💳 **Реальний залишок (Картка):** ${data.realBalance.toFixed(2)} грн
+💰 **Загальний капітал:** ${data.totalCapital.toFixed(2)} грн
+──────────────────
+🤖 **AI-Аналітик:**
+${aiAnalysis}`;
 
         await bot.telegram.sendMessage(process.env.MY_CHAT_ID, reportMessage, { parse_mode: 'Markdown' });
     } catch (error) {
