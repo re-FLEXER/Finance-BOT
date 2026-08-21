@@ -442,6 +442,60 @@ async function getDailyReportData() {
     };
 }
 
+// --- Генерація 5-компонентного AI-аналізу (Gemini) ---
+async function generateDailyAiAnalysis(dailyData) {
+    try {
+        const model = genAI.getGenerativeModel({ model: "gemini-3.5-flash"});
+
+        //1. Отримуємо транзакції за останні 7 днів для порівняння з середнім чеком
+        const sevenDaysAgo = new Date();
+        sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+
+        const pastWeekTx = await prisma.transaction.findMany({
+            where: {
+                createdAt: { gte: sevenDaysAgo},
+                type: 'expense'
+            }
+        });
+
+        const totalWeekExpense = pastWeekTx.reduce((sum, t) => sum + t.amount, 0);
+        const avgDailyExpense = totalWeekExpense / 7;
+
+        //2. Формуємо промпт
+        const prompt = `
+        Ти — особистий фінансовий аналітик та тренер. 
+        Проаналізуй фінансовий день користувача та надай коротку, влучну, структуровану аналітику (до 4-5 речень).
+
+        ДАНІ ЗА СЬОГОДНІ:
+        - Доходи за день: ${dailyData.dayIncome} грн
+        - Витрати за день: ${dailyData.dayExpense} грн
+        - Категорії витрат за сьогодні: ${JSON.stringify(dailyData.categoryExpenses)}
+        - Реальний залишок на картці: ${dailyData.realBalance} грн
+        - Загальний капітал: ${dailyData.totalCapital} грн
+
+        КОНТЕКСТ ДЛЯ ПОРІВНЯННЯ:
+        - Середні денні витрати за останні 7 днів: ${avgDailyExpense.toFixed(2)} грн
+
+        СФОРМУЙ ВІДПОВІДЬ ЗА ТАКИМИ 5 ПУНКТАМИ (використовуй емодзі, будь дружнім, але практичним):
+        1. **Порівняння:** Порівняй сьогоднішні витрати із середніми за тиждень (${avgDailyExpense.toFixed(2)} грн).
+        2. **Структура:** Оціни, на що пішли гроші (чи були це імпульсивні витрати, чи необхідні). Якщо витрат 0 — похвали за "сухий день".
+        3. **Заощадження/Капітал:** Коротка порада щодо збережень або балансу.
+        4. **Питання на вечір:** Постав ОДНЕ влучне запитання про сьогоднішні рішення/покупки, яке змусить замислитися.
+
+        Пиши українською мовою, без складних термінів, стисло та по суті.
+        `;
+
+        const result = await model.generateContent(prompt);
+        return result.response.text().trim();
+    } catch (error) {
+        console.error('Помилка генерації AI аналізу:', error);
+        return "Не вдалося згенерувати AI-аналіз за сьогодні.";
+    }
+
+}
+    
+
+
 // --- АВТОМАТИЧНИЙ ЩОДЕННИЙ ЗВІТ (Cron Job) ---
 cron.schedule('59 23 * * *', async () => {
     console.log('⏰ Запуск вечірнього звіту...');
@@ -453,16 +507,19 @@ cron.schedule('59 23 * * *', async () => {
             categoriesText += `  • ${cat}: ${sum.toFixed(2)} грн\n`;
         }
 
+        const aiAnalysis = await generateDailyAiAnalysis(data);
         const reportMessage = 
-`🌙 **ФІНАНСОВИЙ ПІДСУМОК ДНЯ**
-──────────────────
-🟢 **Доходи за день:** +${data.dayIncome.toFixed(2)} грн
-🔴 **Витрати за день:** -${data.dayExpense.toFixed(2)} грн
+        `🌙 **ФІНАНСОВИЙ ПІДСУМОК ДНЯ**
+        ──────────────────
+        🟢 **Доходи за день:** +${data.dayIncome.toFixed(2)} грн
+        🔴 **Витрати за день:** -${data.dayExpense.toFixed(2)} грн
 
-${categoriesText ? `📂 **Категорії витрат:**\n${categoriesText}` : '👌 Сьогодні витрат не було!\n'}
-💳 **Реальний залишок (Картка):** ${data.realBalance.toFixed(2)} грн
-💰 **Загальний капітал:** ${data.totalCapital.toFixed(2)} грн
-──────────────────`;
+        ${categoriesText ? `📂 **Категорії витрат:**\n${categoriesText}` : '👌 Сьогодні витрат не було!\n'}
+        💳 **Реальний залишок (Картка):** ${data.realBalance.toFixed(2)} грн
+        💰 **Загальний капітал:** ${data.totalCapital.toFixed(2)} грн
+        ──────────────────
+        🤖 **AI-Аналітик:**
+        ${aiAnalysis}`;
 
         await bot.telegram.sendMessage(process.env.MY_CHAT_ID, reportMessage, { parse_mode: 'Markdown' });
     } catch (error) {
