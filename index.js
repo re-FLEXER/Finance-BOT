@@ -377,9 +377,15 @@ bot.on('text', async (ctx) => {
 `;
 
         // Ініціалізація чату
+        // 1. Правильна ініціалізація моделі з systemInstruction
+        const model = genAI.getGenerativeModel({ 
+            model: "gemini-3.5-flash",
+            systemInstruction: systemInstruction 
+        });
+
+        // 2. Ініціалізація чату суто з історією
         const chat = model.startChat({
-            history: history,
-            systemInstruction: systemInstruction
+            history: history
         });
 
         const adviceResult = await chat.sendMessage(userText);
@@ -388,11 +394,11 @@ bot.on('text', async (ctx) => {
             .replace(/<\/h[1-6]>/g, '</b>\n')
             .replace(/\*/g, '');
 
-        // Спочатку відправляємо відповідь користувачу, щоб він не чекав базу даних
+        // 3. Відправляємо відповідь користувачу
         await ctx.telegram.deleteMessage(ctx.chat.id, waitMsg.message_id);
         await ctx.replyWithHTML(`🎩 <b>ТВІЙ РАДНИК:</b>\n\n${safeResponse}`);
 
-        // Зберігаємо обидва повідомлення в Supabase
+        // 4. Зберігаємо обидва повідомлення в Supabase
         await saveChatMessage(userId, 'user', userText);
         await saveChatMessage(userId, 'model', safeResponse);
 
