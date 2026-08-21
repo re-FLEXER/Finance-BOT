@@ -399,15 +399,76 @@ app.get('/ping', (req, res) => {
     res.status(200).send('OK');
 });
 
+// --- ФУНКЦІЯ ЗБОРУ ДЕННОЇ СТАТИСТИКИ ---
+async function getDailyReportData() {
+    const startOfDay = new Date();
+    startOfDay.setHours(0, 0, 0, 0);
+
+    const endOfDay = new Date();
+    endOfDay.setHours(23, 59, 59, 999);
+
+    // 1. Отримуємо транзакції конкретно за сьогодні
+    const dailyTx = await prisma.transaction.findMany({
+        where: {
+            createdAt: {
+                gte: startOfDay,
+                lte: endOfDay
+            }
+        }
+    });
+
+    let dayIncome = 0;
+    let dayExpense = 0;
+    const categoryExpenses = {};
+
+    dailyTx.forEach(t => {
+        if (t.type === 'income') {
+            dayIncome += t.amount;
+        } else if (t.type === 'expense') {
+            dayExpense += t.amount;
+            categoryExpenses[t.category] = (categoryExpenses[t.category] || 0) + t.amount;
+        }
+    });
+
+    // 2. Викликаємо існуючу функцію getStatsData() для загальних залишків
+    const globalStats = await getStatsData();
+
+    return {
+        dayIncome,
+        dayExpense,
+        categoryExpenses,
+        realBalance: globalStats.personalBalance,
+        totalCapital: globalStats.totalCapital
+    };
+}
+
 // --- АВТОМАТИЧНИЙ ЩОДЕННИЙ ЗВІТ (Cron Job) ---
-cron.schedule('59 23 * * *', async () => {
+cron.schedule('05 17 * * *', async () => {
     console.log('⏰ Запуск вечірнього звіту...');
     try {
-        await bot.telegram.sendMessage(process.env.MY_CHAT_ID, '🌙 Тест: Авто-звіт о 23:59 працює!');
-    }   catch (error) {
-            console.error('Помилка відправки авто-звіту:', error);
+        const data = await getDailyReportData();
+
+        let categoriesText = '';
+        for (const [cat, sum] of Object.entries(data.categoryExpenses)) {
+            categoriesText += `  • ${cat}: ${sum.toFixed(2)} грн\n`;
+        }
+
+        const reportMessage = 
+`🌙 **ФІНАНСОВИЙ ПІДСУМОК ДНЯ**
+──────────────────
+🟢 **Доходи за день:** +${data.dayIncome.toFixed(2)} грн
+🔴 **Витрати за день:** -${data.dayExpense.toFixed(2)} грн
+
+${categoriesText ? `📂 **Категорії витрат:**\n${categoriesText}` : '👌 Сьогодні витрат не було!\n'}
+💳 **Реальний залишок (Картка):** ${data.realBalance.toFixed(2)} грн
+💰 **Загальний капітал:** ${data.totalCapital.toFixed(2)} грн
+──────────────────`;
+
+        await bot.telegram.sendMessage(process.env.MY_CHAT_ID, reportMessage, { parse_mode: 'Markdown' });
+    } catch (error) {
+        console.error('Помилка відправки авто-звіту:', error);
     }
- }, {
+}, {
     timezone: "Europe/Kyiv"
 });
 
