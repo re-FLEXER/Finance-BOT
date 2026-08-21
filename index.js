@@ -443,7 +443,7 @@ async function getDailyReportData() {
 }
 
 // --- АВТОМАТИЧНИЙ ЩОДЕННИЙ ЗВІТ (Cron Job) ---
-cron.schedule('05 17 * * *', async () => {
+cron.schedule('59 23 * * *', async () => {
     console.log('⏰ Запуск вечірнього звіту...');
     try {
         const data = await getDailyReportData();
