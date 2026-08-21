@@ -245,12 +245,71 @@ bot.command('getdebt', async (ctx) => {
 
 bot.command('stats', showStats);
 
-// --- ОБРОБКА ТЕКСТОВИХ ПОВІДОМЛЕНЬ ТА РАДНИКА AI ---
+// --- ФУНКЦІЇ ПАМ'ЯТІ ЧАТУ ---
+
+// 1. Збереження повідомлення в базу
+async function saveChatMessage(userId, role, text) {
+    try {
+        await prisma.chatHistory.create({
+            data: {
+                userId: BigInt(userId),
+                role: role, // 'user' або 'model'
+                text: text
+            }
+        });
+    } catch (e) {
+        console.error('Помилка збереження історії:', e);
+    }    
+}
+
+// 2. Зчитування останніх 10 повідомлень у форматі Gemini SDK
+async function getChatHistory(userId) {
+    try {
+        const history = await prisma.chatHistory.findMany({
+            where: { userId: BigInt(userId) },
+            orderBy: { createdAt: 'desc' },
+            take: 10
+        });
+
+        // 1. Спочатку форматуємо масив
+        const formattedHistory = history.reverse().map(item => ({
+            role: item.role,
+            parts: [{ text: item.text }]
+        }));
+
+        // 2. Логуємо для діагностики в термінал
+        console.log('📜 Завантажена історія з Supabase:', JSON.stringify(formattedHistory, null, 2));
+
+        // 3. І тільки в кінці повертаємо результат
+        return formattedHistory;
+
+    } catch (e) {
+        console.error('Помилка зчитування історії:', e);
+        return [];
+    }
+}
+
+// --- ОБРОБКА КНОПКИ "ОЧИСТИТИ ІСТОРІЮ" ---
+bot.hears('🧹 Очистити історію', async (ctx) => {
+    const reminder = 
+`💡 **Щоб візуально очистити екран чату:**
+
+1. Натисни на **3 крапки** у правому верхньому кутку (або на аватар бота).
+2. Обери **«Очистити історію»** (Clear History).
+
+*Усі ваші дані, статистика та база Supabase залишаться в безпеці!*`;
+    await ctx.replyWithMarkdown(reminder);
+})
+
+// --- ОБРОБКА ТЕКСТОВИХ ПОВІДОМЛЕНЬ ТА РАДНИКА AI З ПАМ'ЯТЮ ---
+// --- ОБРОБКА ТЕКСТОВИХ ПОВІДОМЛЕНЬ ТА РАДНИКА AI З ПАМ'ЯТЮ ---
 bot.on('text', async (ctx) => {
     const userId = ctx.from.id;
     const userText = ctx.message.text;
 
-    // Режим "Уточнити"
+    console.log(`📩 Нове повідомлення від ${userId}: "${userText}"`);
+
+    // 1. Режим "Уточнити"
     if (userStates[userId] && userStates[userId].isEditing) {
         const txId = userStates[userId].txId;
         delete userStates[userId];
@@ -288,46 +347,61 @@ bot.on('text', async (ctx) => {
         }
     }
 
-    // AI Радник
+    // 2. AI Радник з інтегрованою пам'яттю (Chat History) та контекстом фінансів
     const waitMsg = await ctx.reply('⏳ Аналізую ваші фінанси...');
     try {
         const stats = await getStatsData();
+        
+        // Зчитуємо історію з перевіркою на масив
+        let rawHistory = await getChatHistory(userId);
+        const history = Array.isArray(rawHistory) ? rawHistory : [];
+
+        console.log(`📜 Завантажено елементів історії для Gemini: ${history.length}`);
+
         const model = genAI.getGenerativeModel({ model: "gemini-3.5-flash" });
 
-        const advisorPrompt = `
-Ти — фінансовий ментор.
+        const systemInstruction = `
+Ти — фінансовий ментор та аналітик.
 Поточний стан користувача:
-- Початковий залишок: ${stats.initBalance} грн.
-- Вільні кошти (Реальний залишок на картці): ${stats.personalBalance} грн.
-- Збереження (Кеш/Банки): ${stats.pSaving} грн.
+- Вільні кошти (Картка): ${stats.personalBalance} грн.
 - Загальний капітал: ${stats.totalCapital} грн.
+- Збереження (Кеш/Банки): ${stats.pSaving} грн.
 - Активні борги користувача (він винен): ${stats.currentIOwe} грн.
 - Йому винні: ${stats.currentOweMe} грн.
 
-Запит користувача: "${userText}"
-Завдання: Дай коротку стратегічну пораду. Враховуй борги! Якщо користувач хоче зробити витрату, але має активні борги чи від'ємний баланс, підсвіти це як ризик.
-Правило: Використовуй тільки базовий HTML (<b>, <i>). Не використовуй markdown зі зірочками.
+Правила відповідей:
+1. Відповідай коротко, лаконічно, дружньо та по суті.
+2. Враховуй попередній контекст діалогу.
+3. Використовуй тільки базовий HTML (<b>, <i>). НЕ використовуй Markdown зі зірочками!
+4. Якщо користувач хоче зробити витрату, але має борги чи малий баланс — підсвіти це як ризик.
 `;
 
-        const adviceResult = await model.generateContent(advisorPrompt);
+        // Ініціалізація чату
+        const chat = model.startChat({
+            history: history,
+            systemInstruction: systemInstruction
+        });
+
+        const adviceResult = await chat.sendMessage(userText);
         let safeResponse = adviceResult.response.text()
             .replace(/<h[1-6]>/g, '<b>')
             .replace(/<\/h[1-6]>/g, '</b>\n')
             .replace(/\*/g, '');
 
+        // Спочатку відправляємо відповідь користувачу, щоб він не чекав базу даних
         await ctx.telegram.deleteMessage(ctx.chat.id, waitMsg.message_id);
         await ctx.replyWithHTML(`🎩 <b>ТВІЙ РАДНИК:</b>\n\n${safeResponse}`);
+
+        // Зберігаємо обидва повідомлення в Supabase
+        await saveChatMessage(userId, 'user', userText);
+        await saveChatMessage(userId, 'model', safeResponse);
+
+        console.log('💾 Запит та відповідь успішно записані в Supabase!');
     } catch (err) {
-        console.error('Помилка AI Радника:', err);
+        console.error('❌ Помилка в блоці AI Радника:', err);
         await ctx.telegram.deleteMessage(ctx.chat.id, waitMsg.message_id);
         await ctx.reply('Вибач, сталася помилка при аналізі фінансів ШІ.');
     }
-});
-
-bot.action(/edit_(\d+)/, async (ctx) => {
-    const txId = parseInt(ctx.match[1]);
-    userStates[ctx.from.id] = { isEditing: true, txId: txId };
-    await ctx.reply('Введіть новий опис (наприклад: "Обмін в готівку", "Оплата за постер", "Погасив борг Сані"):');
 });
 
 // --- ВЕБХУК МОНОБАНКУ ---
