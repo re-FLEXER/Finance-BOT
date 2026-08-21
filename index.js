@@ -144,7 +144,7 @@ bot.command('sync', async (ctx) => {
 
     const allTransactions = await prisma.transaction.findMany();
     let initBalanceId = null;
-    let pIncome = 0, pExpense = 0, pSaving = 0, wIncome = 0, wExpense = 0;
+    let pIncome = 0, pExpense = 0, wIncome = 0, wExpense = 0;
     let payDebtTotal = 0, oweMeTotal = 0, getDebtTotal = 0;
 
     allTransactions.forEach(t => {
@@ -156,14 +156,13 @@ bot.command('sync', async (ctx) => {
         } else {
             if (t.type === 'income') pIncome += t.amount;
             if (t.type === 'expense') pExpense += t.amount;
-            if (t.type === 'saving') pSaving += t.amount;
             if (t.type === 'pay_debt') payDebtTotal += t.amount;
             if (t.type === 'owe_me') oweMeTotal += t.amount;
             if (t.type === 'get_debt') getDebtTotal += t.amount;
         }
     });
 
-    const newInitBalance = realAmount - (pIncome + wIncome) + (pExpense + wExpense) + pSaving + oweMeTotal - getDebtTotal + payDebtTotal;
+    const newInitBalance = realAmount - (pIncome + wIncome) + (pExpense + wExpense) + oweMeTotal - getDebtTotal + payDebtTotal;
 
     if (initBalanceId) {
         await prisma.transaction.update({ where: { id: initBalanceId }, data: { amount: newInitBalance } });
