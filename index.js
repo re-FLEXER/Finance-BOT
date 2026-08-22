@@ -105,8 +105,9 @@ const helpMessage = `
 
 📊 <b>Основи та Статистика:</b>
 • /stats — Переглянути фінансову статистику та реальний залишок.
-• /setbalance <code>&lt;сума&gt;</code> — Встановити початковий залишок (точка відліку на картці).
 • /sync <code>&lt;сума&gt;</code> — <b>Синхронізувати баланс</b>. Вирівнює баланс бота з реальною карткою.
+• /add <code>&lt;сума&gt; &lt;категорія&gt; &lt;опис&gt;</code> — Додати витрату вручну (наприклад: <code>/add 252 Продукти Сім-23</code>).
+• /setbalance <code>&lt;сума&gt;</code> — Встановити початковий залишок (точка відліку на картці).
 • /setsavings <code>&lt;сума&gt;</code> — Синхронізувати суму збережень (Банка/Готівка).
 
 🤝 <b>Модуль Боргів (Debt Tracker):</b>
@@ -116,10 +117,11 @@ const helpMessage = `
 • /getdebt <code>&lt;сума&gt;</code> — Зафіксувати, що тобі повернули борг.
 
 🔄 <b>Керування даними:</b>
+• /help — Список усіх команд бота.
 • /reset — Повністю очистити базу даних (з підтвердженням).
 
 💡 <b>ШІ-Радник:</b>
-• Пиши будь-яке повідомлення і ШІ дасть пораду на базі твого бюджету.
+• Пиши будь-яке повідомлення у чат, і ШІ надасть фінансову пораду на основі твого бюджету.
 `;
 
 bot.command(['help', 'commands'], async (ctx) => {
@@ -303,7 +305,36 @@ bot.hears('🧹 Очистити історію', async (ctx) => {
     await ctx.replyWithMarkdown(reminder);
 })
 
-// --- ОБРОБКА ТЕКСТОВИХ ПОВІДОМЛЕНЬ ТА РАДНИКА AI З ПАМ'ЯТЮ ---
+// --- РУЧНЕ ДОДАВАННЯ ВИТРАТИ ---
+bot.command('add', async (ctx) => {
+    const text = ctx.message.text.replace('/add', '').trim();
+    const parts = text.split(' ');
+    const amount = parseFloat(parts[0]);
+    const category = parts[1] || 'Продукти';
+    const description = parts.slice(2).join(' ') || 'Ручний ввід';
+
+    if (isNaN(amount)) {
+        return ctx.reply('⚠️ Формат: /add <сума> <категорія> <опис>\nНаприклад: /add 252 Продукти Сім-23');
+    }
+
+    try {
+        await prisma.transaction.create({
+            data: {
+                type: 'expense',
+                amount: amount,
+                category: category,
+                description: description,
+                workspace: 'Особисте'
+            }
+        });
+
+        await ctx.reply(`✅ Витрату ${amount} грн (${category}) додано в базу!\nНе забудь викликати /sync з актуальним балансом.`);
+    } catch (error) {
+        console.error('Помилка ручного додавання:', error);
+        await ctx.reply('❌ Не вдалося зберегти витрату.');
+    }
+});
+
 // --- ОБРОБКА ТЕКСТОВИХ ПОВІДОМЛЕНЬ ТА РАДНИКА AI З ПАМ'ЯТЮ ---
 bot.on('text', async (ctx) => {
     const userId = ctx.from.id;
@@ -423,12 +454,21 @@ app.post('/monobank', async (req, res) => {
     const monoId = item.id;
 
     try {
-        // ВИПРАВЛЕНО: Перевірка на дублікати (якщо такий monoId вже є, ігноруємо)
+        // 1. Перевірка на дублікати
         const existingTx = await prisma.transaction.findFirst({ where: { monoId: monoId } });
         if (existingTx) return;
 
-        const model = genAI.getGenerativeModel({ model: "gemini-3.5-flash" });
-        const prompt = `Проаналізуй фінансову транзакцію. 
+        // 2. ФОЛБЕК-ЗНАЧЕННЯ (якщо Gemini буде недоступний)
+        let aiData = {
+            type: isIncome ? 'income' : 'expense',
+            category: 'Інше',
+            workspace: 'Особисте'
+        };
+
+        // 3. ІЗОЛЬОВАНИЙ СПРОБ ОПРАЦЮВАННЯ ЧЕРЕЗ GEMINI
+        try {
+            const model = genAI.getGenerativeModel({ model: "gemini-3.5-flash" });
+            const prompt = `Проаналізуй фінансову транзакцію. 
 Опис: "${description}". Сума: ${amount}. Зарахування: ${isIncome}.
 
 ТИ ПОВИНЕН ОБРАТИ TYPE ТІЛЬКИ З ЦЬОГО СПИСКУ ЗА СУВОРИМИ ПРАВИЛАМИ:
@@ -443,13 +483,17 @@ app.post('/monobank', async (req, res) => {
 
 Визнач type, category (коротко, 1-2 слова) та workspace. Формат JSON: {"type": "...", "category": "...", "workspace": "..."}`;
 
-        const result = await model.generateContent(prompt);
-        const textResponse = result.response.text().trim().replace(/```json/g, '').replace(/```/g, '').trim();
-        const aiData = JSON.parse(textResponse);
+            const result = await model.generateContent(prompt);
+            const textResponse = result.response.text().trim().replace(/```json/g, '').replace(/```/g, '').trim();
+            aiData = JSON.parse(textResponse);
+        } catch (aiError) {
+            console.error('⚠️ Gemini тимчасово недоступний (503 або таймаут). Використовуємо фолбек:', aiError.message);
+        }
 
+        // 4. ГАРАНТОВАНЕ ЗБЕРЕЖЕННЯ В БАЗУ (працює завжди!)
         const savedTx = await prisma.transaction.create({
             data: {
-                monoId: monoId, // Зберігаємо ID від Монобанку
+                monoId: monoId,
                 type: aiData.type,
                 amount: amount,
                 category: aiData.category,
@@ -471,12 +515,6 @@ app.post('/monobank', async (req, res) => {
     } catch (e) {
         console.error('Помилка обробки Монобанку:', e);
     }
-});
-
-// --- СТАРТ СЕРВЕРА ТА РЕЄСТРАЦІЯ ВЕБХУКУ ---
-const PORT = process.env.PORT || 3000;
-app.get('/ping', (req, res) => {
-    res.status(200).send('OK');
 });
 
 // --- ФУНКЦІЯ ЗБОРУ ДЕННОЇ СТАТИСТИКИ ---
@@ -575,12 +613,12 @@ async function generateDailyAiAnalysis(dailyData) {
 }
     
 // --- АВТОМАТИЧНИЙ ЩОДЕННИЙ ЗВІТ (Cron Job) ---
-cron.schedule('41 17 * * *', async () => {
+cron.schedule('59 23 * * *', async () => {
     console.log('⏰ Запуск вечірнього звіту...');
     try {
         const data = await getDailyReportData();
 
-        //Форматуємо поточну дату (наприклад: "21 серпня 2026")
+        // Форматуємо поточну дату (наприклад: "22 серпня 2026")
         const todayFormatted = new Date().toLocaleDateString('uk-UA', {
             day: 'numeric',
             month: 'long',
@@ -617,10 +655,17 @@ ${aiAnalysis}`;
     timezone: "Europe/Kyiv"
 });
 
+// --- СТАРТ СЕРВЕРА ТА РЕЄСТРАЦІЯ ВЕБХУКУ ---
+const PORT = process.env.PORT || 3000; // <-- ОГОЛОШЕННЯ PORT (ДОДАНО)
+
+app.get('/ping', (req, res) => {        // <-- ЕНДПОІНТ PING (ДОДАНО)
+    res.status(200).send('OK');
+});
+
 app.listen(PORT, async () => {
     console.log(`Сервер працює на порту ${PORT}`);
     
-    // ПОВЕРНУТО: Реєстрація меню підказок в самому Telegram
+    // Реєстрація меню підказок в самому Telegram
     try {
         await bot.telegram.setMyCommands([
             { command: 'stats', description: '📊 Фінансова статистика' },
@@ -632,7 +677,8 @@ app.listen(PORT, async () => {
             { command: 'paydebt', description: '💸 Віддав свій борг' },
             { command: 'getdebt', description: '📥 Мені повернули борг' },
             { command: 'help', description: 'ℹ️ Список усіх команд' },
-            { command: 'reset', description: '⚠️ Очистити всі дані' }
+            { command: 'reset', description: '⚠️ Очистити всі дані' },
+            { command: 'add', description: '➕ Ручна витрата (сума категорія опис)' }
         ]);
     } catch (err) {
         console.error('Помилка встановлення меню команд:', err);
