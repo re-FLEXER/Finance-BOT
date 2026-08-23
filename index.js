@@ -10,6 +10,64 @@ app.use(express.json());
 
 const prisma = new PrismaClient();
 const bot = new Telegraf(process.env.BOT_TOKEN);
+
+// --- MIDDLEWARE: ЖОРСТКИЙ WHITELIST ТА АЛЕРТ ---
+bot.use(async (ctx, next) => {
+    const allowedUserId = Number(process.env.MY_CHAT_ID);
+    const userId = ctx.from?.id;
+
+    // 1. Якщо це я пропускаємо - далі
+    if (userId === allowedUserId) {
+        return next();
+    }
+
+    // 2. Збираємо дані про unavtorized user для мого сповіщення
+    const firstName = ctx.from?.first_name || 'Без імені';
+    const lastName = ctx.from?.last_name || '';
+    const username = ctx.from?.username ? `@${ctx.from.username}` : 'немає юзернейму';
+    const isPremium = ctx.from?.is_premium ? '⭐ Telegram Premium' : 'Звичайний акаунт';
+    const lang = ctx.from?.language_code || 'невідомо';
+    const textSent = ctx.message?.text || '[медіа/команда]';
+
+    const now = new Date().toLocaleString('uk-UA', { timeZone: 'Europe/Kyiv'});
+
+    // FULL досьє для мене
+    const alertMsg = 
+`🚨 <b>!IMPORTANT! Несанкціонований вхід — відхилено</b>
+
+👤 <b>Користувач:</b> ${firstName} ${lastName} (${username})
+🆔 <b>ID:</b> <code>${userId}</code>
+💎 <b>Статус:</b> ${isPremium}
+🌐 <b>Мова додатка:</b> ${lang}
+💬 <b>Спроба відправити:</b> <i>"${textSent}"</i>
+📅 <b>Час:</b> ${now}
+
+🔗 <a href="tg://user?id=${userId}">Переглянути профіль користувача</a>`;
+
+    try {
+        await bot.telegram.sendMessage(allowedUserId, alertMsg, { parse_mode: 'HTML'});
+    } catch (e) {
+        console.error('Помилка відправки алерту про Unavtorized User', e);
+    }
+
+    // 3. Екран відмови для Unavtorized User
+    const rejectMsg = 
+`🛑 <b>TERMINAL ACCESS RESTRICTED</b>
+━━━━━━━━━━━━━━━━━━━
+⚠️ <b>PROTOCOL: DISCOVERY_DENIED (403)</b>
+
+Система зафіксувала спробу несанкціонованого проникнення до приватного фінансового ядра. 
+
+⚙️ <b>СИСТЕМНИЙ ЛОГ:</b>
+• <b>Target ID:</b> <code>${userId}</code>
+• <b>Threat Level:</b> <code>CRITICAL</code>
+• <b>Action:</b> IP & Session Isolated
+
+🛡 <i>Ваші ідентифікатори передані адміністратору. Термінал заблоковано. Подальші спроби будуть розцінені як пряма атака.</i>`;
+
+    return ctx.replyWithHTML(rejectMsg);
+}) 
+
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 const userStates = {};
