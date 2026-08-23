@@ -74,8 +74,25 @@ bot.use(async (ctx, next) => {
 }) 
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-
 const userStates = {};
+
+// 🛡 Хелпер для безпечного екранування спецсимволів HTML
+function escapeHtml(text) {
+    if (!text) return '';
+    return String(text)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+}
+
+// 🧹 Хелпер для очистки відповідей Gemini від Markdown-артефактів
+function cleanAiResponse(text) {
+    if (!text) return '';
+    return text
+        .replace(/\*\*(.*?)\*\*/g, '<b>$1</b>')  // Замінюємо **жирний** на <b>
+        .replace(/\*(.*?)\*/g, '<i>$1</i>')      // Замінюємо *курсив* на <i>
+        .replace(/`/g, '');                      // Прибираємо бeктіки
+}
 
 // --- ТЕЛЕГРАМ ВЕБХУК НАЛАШТУВАННЯ ---
 const WEBHOOK_PATH = `/telegram/${process.env.BOT_TOKEN}`;
@@ -134,23 +151,25 @@ const getStatsData = async () => {
 const showStats = async (ctx) => {
     try {
         const stats = await getStatsData();
-        const message = `📊 <b>ФІНАНСОВА СТАТИСТИКА</b>\n` +
-                        `━━━━━━━━━━━━━━━━━━\n` +
-                        `🏁 <b>Початковий залишок:</b> ${stats.initBalance.toFixed(2)} грн\n` +
-                        `👤 <b>ОСОБИСТИЙ БЮДЖЕТ</b>\n` +
-                        `🟢 <b>Доходи:</b> ${stats.pIncome.toFixed(2)} грн\n` +
-                        `🔴 <b>Витрати:</b> ${stats.pExpense.toFixed(2)} грн\n` +
-                        `🟡 <b>Збереження (Банка/Кеш):</b> ${stats.pSaving.toFixed(2)} грн\n` +
-                        `🤝 <b>Мені винні (Актив):</b> ${stats.currentOweMe.toFixed(2)} грн\n` +
-                        `⚠️ <b>Я винен (Пасив):</b> ${stats.currentIOwe.toFixed(2)} грн\n` +
-                        `💳 <b>РЕАЛЬНИЙ ЗАЛИШОК (Картка):</b> ${stats.personalBalance.toFixed(2)} грн\n` +
-                        `━━━━━━━━━━━━━━━━━━\n` +
-                        `💰 <b>ЗАГАЛЬНИЙ КАПІТАЛ:</b> ${stats.totalCapital.toFixed(2)} грн\n` +
-                        `━━━━━━━━━━━━━━━━━━\n` +
-                        `💼 <b>ПРОЄКТИ ТА ФРИЛАНС</b>\n` +
-                        `🟢 <b>Доходи:</b> ${stats.wIncome.toFixed(2)} грн\n` +
-                        `🔴 <b>Витрати:</b> ${stats.wExpense.toFixed(2)} грн\n` +
-                        `📈 <b>Чиста рентабельність:</b> ${stats.workProfit.toFixed(2)} грн`;
+        const message = 
+`📊 <b>ФІНАНСОВА СТАТИСТИКА</b>
+━━━━━━━━━━━━━━━━━━
+🏁 <b>Початковий залишок:</b> <code>${stats.initBalance.toFixed(2)}</code> грн
+
+👤 <b>ОСОБИСТИЙ БЮДЖЕТ</b>
+🟢 <b>Доходи:</b> <code>${stats.pIncome.toFixed(2)}</code> грн
+🔴 <b>Витрати:</b> <code>${stats.pExpense.toFixed(2)}</code> грн
+🟡 <b>Збереження (Банка/Кеш):</b> <code>${stats.pSaving.toFixed(2)}</code> грн
+🤝 <b>Мені винні (Актив):</b> <code>${stats.currentOweMe.toFixed(2)}</code> грн
+⚠️ <b>Я винен (Пасив):</b> <code>${stats.currentIOwe.toFixed(2)}</code> грн
+💳 <b>РЕАЛЬНИЙ ЗАЛИШОК (Картка):</b> <code>${stats.personalBalance.toFixed(2)}</code> грн
+━━━━━━━━━━━━━━━━━━
+💰 <b>ЗАГАЛЬНИЙ КАПІТАЛ:</b> <code>${stats.totalCapital.toFixed(2)}</code> грн
+━━━━━━━━━━━━━━━━━━
+💼 <b>ПРОЄКТИ ТА ФРИЛАНС</b>
+🟢 <b>Доходи:</b> <code>${stats.wIncome.toFixed(2)}</code> грн
+🔴 <b>Витрати:</b> <code>${stats.wExpense.toFixed(2)}</code> грн
+📈 <b>Чиста рентабельність:</b> <code>${stats.workProfit.toFixed(2)}</code> грн`;
         
         await ctx.replyWithHTML(message);
     } catch (error) {
@@ -357,13 +376,13 @@ async function getChatHistory(userId) {
 // --- ОБРОБКА КНОПКИ "ОЧИСТИТИ ІСТОРІЮ" ---
 bot.hears('🧹 Очистити історію', async (ctx) => {
     const reminder = 
-`💡 **Щоб візуально очистити екран чату:**
+`💡 <b>Щоб візуально очистити екран чату:</b>
 
-1. Натисни на **3 крапки** у правому верхньому кутку (або на аватар бота).
-2. Обери **«Очистити історію»** (Clear History).
+1. Натисни на <b>3 крапки</b> у правому верхньому кутку (або на аватар бота).
+2. Обери <b>«Очистити історію»</b> (Clear History).
 
-*Усі ваші дані, статистика та база Supabase залишаться в безпеці!*`;
-    await ctx.replyWithMarkdown(reminder);
+<i>Усі ваші дані, статистика та база Supabase залишаться в безпеці!</i>`;
+    await ctx.replyWithHTML(reminder);
 })
 
 // --- ОБРОБКА ТЕКСТОВИХ ПОВІДОМЛЕНЬ ТА РАДНИКА AI З ПАМ'ЯТЮ ---
@@ -395,16 +414,22 @@ bot.on('text', async (ctx) => {
 
 Визнач type, category (коротко, 1-2 слова) та workspace. Формат JSON: {"type": "...", "category": "...", "workspace": "..."}`;
             
-            const result = await model.generateContent(prompt);
-            const textResponse = result.response.text().trim().replace(/```json/g, '').replace(/```/g, '').trim();
-            const aiData = JSON.parse(textResponse);
-
+    const result = await model.generateContent(prompt);
+    const textResponse = result.response.text().trim().replace(/```json/g, '').replace(/```/g, '').trim();
+    const aiData = JSON.parse(textResponse);
+    
             await prisma.transaction.update({
-                where: { id: txId },
-                data: { type: aiData.type, category: aiData.category, workspace: aiData.workspace, description: userText }
-            });
+            where: { id: txId },
+            data: { 
+                type: aiData.type, 
+                category: aiData.category, 
+                workspace: aiData.workspace, 
+                description: userText 
+            }
+        });
 
-            return ctx.reply('✅ Транзакцію та її тип успішно оновлено!');
+            // 🎯 Відправляємо чисте HTML повідомлення замість сирого JSON
+          return ctx.replyWithHTML('✅ <b>Транзакцію та її тип успішно оновлено!</b>');
         } catch (e) {
             console.error('Помилка оновлення уточнення:', e);
             return ctx.reply('Не вдалося оновити транзакцію.');
@@ -456,7 +481,7 @@ bot.on('text', async (ctx) => {
         });
 
         const adviceResult = await chat.sendMessage(userText);
-        let safeResponse = adviceResult.response.text()
+        let safeResponse = cleanAiResponse(adviceResult.response.text())
             .replace(/<h[1-6]>/g, '<b>')
             .replace(/<\/h[1-6]>/g, '</b>\n')
             .replace(/\*/g, '');
@@ -525,11 +550,16 @@ app.post('/monobank', async (req, res) => {
             }
         });
 
-        const msg = `🏦 <b>Monobank</b> | Автоматично\n\n` +
+        // 🛡 Екрануємо зовнішній текст від спецсимволів
+        const cleanDescription = escapeHtml(description);
+        const cleanCategory = escapeHtml(aiData.category);
+
+
+       const msg = `🏦 <b>Monobank</b> | Автоматично\n\n` +
                     `📦 <b>Простір:</b> ${aiData.workspace}\n` +
-                    `🏷 <b>Категорія:</b> ${aiData.category}\n\n` +
-                    `💵 <b>Сума:</b> ${amount} грн\n` +
-                    `📝 <b>Опис:</b> ${description}`;
+                    `🏷 <b>Категорія:</b> ${cleanCategory}\n\n` +
+                    `💵 <b>Сума:</b> <code>${amount.toFixed(2)}</code> грн\n` +
+                    `📝 <b>Опис:</b> <i>${cleanDescription}</i>`;
 
         await bot.telegram.sendMessage(process.env.MY_CHAT_ID, msg, {
             parse_mode: 'HTML',
@@ -656,24 +686,26 @@ cron.schedule('41 17 * * *', async () => {
 
         let categoriesText = '';
         for (const [cat, sum] of Object.entries(data.categoryExpenses)) {
-            categoriesText += `  • ${cat}: ${sum.toFixed(2)} грн\n`;
+            categoriesText += `  • ${escapeHtml(cat)}: <code>${sum.toFixed(2)}</code> грн\n`;
         }
 
-        const aiAnalysis = await generateDailyAiAnalysis(data);
-        const reportMessage = 
-`🌙 **ФІНАНСОВИЙ ПІДСУМОК ДНЯ — ${todayFormatted}**
-──────────────────
-🟢 **Доходи за день:** +${data.dayIncome.toFixed(2)} грн
-🔴 **Витрати за день:** -${data.dayExpense.toFixed(2)} грн
+        const rawAiAnalysis = await generateDailyAiAnalysis(data);
+        const aiAnalysis = await generateDailyAiAnalysis(rawAiAnalysis);
 
-${categoriesText ? `📂 **Категорії витрат:**\n${categoriesText}` : '👌 Сьогодні витрат не було!\n'}
-💳 **Реальний залишок (Картка):** ${data.realBalance.toFixed(2)} грн
-💰 **Загальний капітал:** ${data.totalCapital.toFixed(2)} грн
-──────────────────
-🤖 **AI-Аналітик:**
+        const reportMessage = 
+`🌙 <b>ФІНАНСОВИЙ ПІДСУМОК ДНЯ — ${todayFormatted}</b>
+━━━━━━━━━━━━━━━━━━
+🟢 <b>Доходи за день:</b> +<code>${data.dayIncome.toFixed(2)}</code> грн
+🔴 <b>Витрати за день:</b> -<code>${data.dayExpense.toFixed(2)}</code> грн
+
+${categoriesText ? `📂 <b>Категорії витрат:</b>\n${categoriesText}` : '👌 Сьогодні витрат не було!\n'}
+💳 <b>Реальний залишок (Картка):</b> <code>${data.realBalance.toFixed(2)}</code> грн
+💰 <b>Загальний капітал:</b> <code>${data.totalCapital.toFixed(2)}</code> грн
+━━━━━━━━━━━━━━━━━━
+🤖 <b>AI-Аналітик:</b>
 ${aiAnalysis}`;
 
-        await bot.telegram.sendMessage(process.env.MY_CHAT_ID, reportMessage, { parse_mode: 'Markdown' });
+        await bot.telegram.sendMessage(process.env.MY_CHAT_ID, reportMessage, { parse_mode: 'HTML' });
 
         // Зберігаємо вечірній аналіз в історію чату, щоб Gemini пам'ятала своє запитання
         await saveChatMessage(process.env.MY_CHAT_ID, 'model', reportMessage);
