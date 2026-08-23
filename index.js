@@ -87,12 +87,12 @@ function escapeHtml(text) {
 
 // 📊 Хелпер для генерації візуального прогрес-бару
 function generateProgressBar(current, total, length = 10) {
-    if (total <= 0) return '[🟩🟩🟩🟩🟩🟩🟩🟩🟩🟩] 100%';
+    if (total <= 0) return '[🟩🟩🟩🟩🟩🟩🟩🟩🟩🟩] <b>100%</b>';
 
     //Розраховуємо відсоток (не більше 100% і не меньше 0%)
     const percentage = Math.min(Math.max((current / total) * 100, 0), 100);
     const filledLenght = Math.round((length * percentage) / 100);
-    const emptyLenght = length = filledLenght;
+    const emptyLenght = length - filledLenght;
     
     //Задаємо що зелені квадрати - закритий борг, червоні залишок боргу
     const filledBar = '🟩'.repeat(filledLenght);
@@ -185,7 +185,7 @@ const showStats = async (ctx) => {
 🟡 <b>Збереження (Банка/Кеш):</b> <code>${stats.pSaving.toFixed(2)}</code> грн
 🤝 <b>Мені винні (Актив):</b> <code>${stats.currentOweMe.toFixed(2)}</code> грн
 ⚠️ <b>Я винен (Пасив):</b> <code>${stats.currentIOwe.toFixed(2)}</code> грн
-    ${hasDebt ? `📉 <b>Виплата боргу:</b> ${debtProgressBar}\n` : ''}
+${hasDebt ? `📉 <b>Виплата боргу:</b>\n${debtProgressBar}\n` : ''}
 💳 <b>РЕАЛЬНИЙ ЗАЛИШОК (Картка):</b> <code>${stats.personalBalance.toFixed(2)}</code> грн
 ━━━━━━━━━━━━━━━━━━
 💰 <b>ЗАГАЛЬНИЙ КАПІТАЛ:</b> <code>${stats.totalCapital.toFixed(2)}</code> грн
