@@ -688,7 +688,14 @@ app.listen(PORT, async () => {
     console.log(`Сервер працює на порту ${PORT}`);
     
     // ПОВЕРНУТО: Реєстрація меню підказок в самому Telegram
+    // Реєстрація меню команд ТІЛЬКИ для тебе (конкретного chat_id)
     try {
+        const allowedUserId = Number(process.env.MY_CHAT_ID);
+
+        // 1. Очищаємо дефолтне меню для всіх чужинців
+        await bot.telegram.setMyCommands([]);
+
+        // 2. Встановлюємо список команд ТІЛЬКИ для твого ID
         await bot.telegram.setMyCommands([
             { command: 'stats', description: '📊 Фінансова статистика' },
             { command: 'sync', description: '🔄 Синхронізувати баланс з карткою' },
@@ -699,8 +706,13 @@ app.listen(PORT, async () => {
             { command: 'paydebt', description: '💸 Віддав свій борг' },
             { command: 'getdebt', description: '📥 Мені повернули борг' },
             { command: 'help', description: 'ℹ️ Список усіх команд' },
-            { command: 'reset', description: '⚠️ Очистити всі дані' }
-        ]);
+            { command: 'reset', description: '⚠️ Очистити всі дані' },
+            { command: 'add', description: '➕ Ручна витрата (сума категорія опис)' }
+        ], {
+            scope: { type: 'chat', chat_id: allowedUserId }
+        });
+
+        console.log('✅ Персональне меню команд встановлено!');
     } catch (err) {
         console.error('Помилка встановлення меню команд:', err);
     }
