@@ -85,6 +85,23 @@ function escapeHtml(text) {
         .replace(/>/g, '&gt;');
 }
 
+// 📊 Хелпер для генерації візуального прогрес-бару
+function generateProgressBar(current, total, length = 10) {
+    if (total <= 0) return '[🟩🟩🟩🟩🟩🟩🟩🟩🟩🟩] 100%';
+
+    //Розраховуємо відсоток (не більше 100% і не меньше 0%)
+    const percentage = Math.min(Math.max((current / total) * 100, 0), 100);
+    const filledLenght = Math.round((length * percentage) / 100);
+    const emptyLenght = length = filledLenght;
+    
+    //Задаємо що зелені квадрати - закритий борг, червоні залишок боргу
+    const filledBar = '🟩'.repeat(filledLenght);
+    const emptyBar = '🟥'.repeat(emptyLenght);
+
+    return `[${filledBar}${emptyBar}] <b>${percentage.toFixed(0)}%</b>`;
+}
+
+
 // 🧹 Хелпер для очистки відповідей Gemini від Markdown-артефактів
 function cleanAiResponse(text) {
     if (!text) return '';
@@ -144,13 +161,18 @@ const getStatsData = async () => {
 
     return {
         initBalance, pIncome, pExpense, pSaving: totalSavings, wIncome, wExpense,
-        currentIOwe, currentOweMe, workProfit, personalBalance, totalCapital
+        currentIOwe, currentOweMe, workProfit, personalBalance, totalCapital,
+        iOweTotal,payDebtTotal
     };
 };
 
 const showStats = async (ctx) => {
     try {
         const stats = await getStatsData();
+
+        const debtProgressBar = generateProgressBar(stats.payDebtTotal, stats.iOweTotal);
+        const hasDebt = stats.iOweTotal > 0;
+
         const message = 
 `📊 <b>ФІНАНСОВА СТАТИСТИКА</b>
 ━━━━━━━━━━━━━━━━━━
