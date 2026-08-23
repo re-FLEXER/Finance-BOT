@@ -170,8 +170,9 @@ const showStats = async (ctx) => {
     try {
         const stats = await getStatsData();
 
-        const debtProgressBar = generateProgressBar(stats.payDebtTotal, stats.iOweTotal);
-        const hasDebt = stats.iOweTotal > 0;
+        const totalDebt = stats.payDebtTotal + stats.currentIOwe;
+        const debtProgressBar = generateProgressBar(stats.payDebtTotal, totalDebt);
+        const hasDebt = stats.currentIOwe > 0 || stats.payDebtTotal > 0;
 
         const message = 
 `📊 <b>ФІНАНСОВА СТАТИСТИКА</b>
