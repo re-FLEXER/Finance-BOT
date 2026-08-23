@@ -13,15 +13,20 @@ const bot = new Telegraf(process.env.BOT_TOKEN);
 
 // --- MIDDLEWARE: ЖОРСТКИЙ WHITELIST ТА АЛЕРТ ---
 bot.use(async (ctx, next) => {
+    // 1. Обробляємо ТІЛЬКИ реальні повідомлення (щоб уникнути дублювання від системних апдейтів)
+    if (!ctx.message) {
+        return;
+    }
+
     const allowedUserId = Number(process.env.MY_CHAT_ID);
     const userId = ctx.from?.id;
 
-    // 1. Якщо це я пропускаємо - далі
+    // 2. Якщо це я пропускаємо - далі
     if (userId === allowedUserId) {
         return next();
     }
 
-    // 2. Збираємо дані про unavtorized user для мого сповіщення
+    // 3. Збираємо дані про unavtorized user для мого сповіщення
     const firstName = ctx.from?.first_name || 'Без імені';
     const lastName = ctx.from?.last_name || '';
     const username = ctx.from?.username ? `@${ctx.from.username}` : 'немає юзернейму';
