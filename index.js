@@ -176,7 +176,7 @@ const showStats = async (ctx) => {
 
         const message = 
 `📊 <b>ФІНАНСОВА СТАТИСТИКА</b>
-━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━
 🏁 <b>Початковий залишок:</b> <code>${stats.initBalance.toFixed(2)}</code> грн
 
 👱 <b>ОСОБИСТИЙ БЮДЖЕТ</b>
@@ -186,10 +186,10 @@ const showStats = async (ctx) => {
 💳 <b>РЕАЛЬНИЙ ЗАЛИШОК (Картка):</b> <code>${stats.personalBalance.toFixed(2)}</code> грн
 🤝 <b>Мені винні (Актив):</b> <code>${stats.currentOweMe.toFixed(2)}</code> грн
 ⚠️ <b>Я винен (Пасив):</b> <code>${stats.currentIOwe.toFixed(2)}</code> грн
-${hasDebt ? `📉 <b>Виплата боргу:</b> ${debtProgressBar}\n` : ''}
-━━━━━━━━━━━━━━━━━━
+${hasDebt ? `📉 <b>Виплата боргу:</b> ${debtProgressBar}` : ''}
+━━━━━━━━━━━━━━━━━━━━━
 💰 <b>ЗАГАЛЬНИЙ КАПІТАЛ:</b> <code>${stats.totalCapital.toFixed(2)}</code> грн
-━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━
 💼 <b>ПРОЄКТИ ТА ФРИЛАНС</b>
 🟢 <b>Доходи:</b> <code>${stats.wIncome.toFixed(2)}</code> грн
 🔴 <b>Витрати:</b> <code>${stats.wExpense.toFixed(2)}</code> грн
