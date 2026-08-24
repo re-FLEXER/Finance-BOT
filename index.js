@@ -696,7 +696,7 @@ async function generateDailyAiAnalysis(dailyData) {
 }
     
 // --- АВТОМАТИЧНИЙ ЩОДЕННИЙ ЗВІТ (Cron Job) ---
-cron.schedule('41 17 * * *', async () => {
+cron.schedule('59 23 * * *', async () => {
     console.log('⏰ Запуск вечірнього звіту...');
     try {
         const data = await getDailyReportData();
