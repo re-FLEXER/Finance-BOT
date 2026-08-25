@@ -13,8 +13,8 @@ const bot = new Telegraf(process.env.BOT_TOKEN);
 
 // --- MIDDLEWARE: ЖОРСТКИЙ WHITELIST ТА АЛЕРТ ---
 bot.use(async (ctx, next) => {
-    // 1. Обробляємо ТІЛЬКИ реальні повідомлення (щоб уникнути дублювання від системних апдейтів)
-    if (!ctx.message) {
+   // ✅ НОВИЙ КОД (ПРОПУСКАЄ І ТЕКСТ, І КНОПКИ):
+    if (!ctx.message && !ctx.callbackQuery) {
         return;
     }
 
