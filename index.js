@@ -438,6 +438,10 @@ bot.on('text', async (ctx) => {
         const txId = userStates[userId].txId;
         delete userStates[userId];
 
+        // ⚡ UX-Фікс: Миттєва відповідь користувачу, щоб прибрати візуальну затримку
+        const statusMsg = await ctx.reply('⏳ Аналізую новий опис та оновлюю категорію...');
+
+
         try {
             const model = genAI.getGenerativeModel({ model: "gemini-3.5-flash" });
             const prompt = `Проаналізуй фінансову транзакцію. 
@@ -455,7 +459,16 @@ bot.on('text', async (ctx) => {
 
 Визнач type, category (коротко, 1-2 слова) та workspace. Формат JSON: {"type": "...", "category": "...", "workspace": "..."}`;
             
-            const result = await model.generateContent(prompt);
+            // 🔄 Автоматичний повтор запиту (Retry) якщо Google видав 503      
+            let result;
+            try {
+                result = await model.generateContent(prompt);
+            } catch (retryErr) {
+                console.warn('⚠️ Тимчасове перевантаження Gemini (503), робимо повторний запит...');
+                await new Promise(res => setTimeout(res, 1000)); // пауза 1 секунда
+                result = await model.generateContent(prompt);
+            }
+
             const textResponse = result.response.text().trim().replace(/```json/g, '').replace(/```/g, '').trim();
             const aiData = JSON.parse(textResponse);
             
@@ -469,11 +482,22 @@ bot.on('text', async (ctx) => {
                 }
             });
 
-            // 🎯 Відправляємо повідомлення ТІЛЬКИ ПІСЛЯ оновлення в базі
-            return ctx.replyWithHTML('✅ <b>Транзакцію та її тип успішно оновлено!</b>');
+            // 🎯 Редагуємо статусне повідомлення на успіх
+            return await ctx.telegram.editMessageText(
+                ctx.chat.id,
+                statusMsg.message_id,
+                null,
+                `✅ <b>Транзакцію успішно оновлено!</b>\n🏷 <b>Категорія:</b> ${aiData.category}\n📦 <b>Простір:</b> ${aiData.workspace}`,
+                { parse_mode: 'HTML' }
+            );
         } catch (e) {
             console.error('Помилка оновлення уточнення:', e);
-            return ctx.reply('Не вдалося оновити транзакцію.');
+            return await ctx.telegram.editMessageText(
+                ctx.chat.id,
+                statusMsg.message_id,
+                null,
+                '❌ Не вдалося оновити транзакцію (сервери AI тимчасово перевантажені).'
+            );
         }
     }
 
