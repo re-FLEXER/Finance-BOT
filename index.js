@@ -755,7 +755,7 @@ cron.schedule('59 23 * * *', async () => {
         }
 
         const rawAiAnalysis = await generateDailyAiAnalysis(data);
-        const aiAnalysis = await generateDailyAiAnalysis(rawAiAnalysis);
+        const aiAnalysis = cleanAiResponse(rawAiAnalysis);
 
         const reportMessage = 
 `🌙 <b>ФІНАНСОВИЙ ПІДСУМОК ДНЯ — ${todayFormatted}</b>
