@@ -409,6 +409,23 @@ bot.hears('🧹 Очистити історію', async (ctx) => {
     await ctx.replyWithHTML(reminder);
 })
 
+// --- ОБРОБКА КНОПКИ "УТОЧНИТИ" ---
+bot.action(/^edit_(\d+)$/, async (ctx) => {
+    //1. Зупиняємо анімацію завантаження на кнопці в Telegram
+    await ctx.answerCbQuery();
+
+    const txId = parseInt(ctx.match[1], 10);
+    const userId = ctx.from.id;
+
+    //2. Зберігаємо стан редагування для користувача
+    userStates[userId] = {
+        isEditing: true,
+        txId: txId
+    };
+
+    await ctx.reply('✍️ Вкажи уточнення для цієї транзакції (наприклад: <i>"Одяг, купив куртку"</i>):', { parse_mode: 'HTML' });
+});
+
 // --- ОБРОБКА ТЕКСТОВИХ ПОВІДОМЛЕНЬ ТА РАДНИКА AI З ПАМ'ЯТЮ ---
 bot.on('text', async (ctx) => {
     const userId = ctx.from.id;
@@ -438,22 +455,22 @@ bot.on('text', async (ctx) => {
 
 Визнач type, category (коротко, 1-2 слова) та workspace. Формат JSON: {"type": "...", "category": "...", "workspace": "..."}`;
             
-    const result = await model.generateContent(prompt);
-    const textResponse = result.response.text().trim().replace(/```json/g, '').replace(/```/g, '').trim();
-    const aiData = JSON.parse(textResponse);
-    
+            const result = await model.generateContent(prompt);
+            const textResponse = result.response.text().trim().replace(/```json/g, '').replace(/```/g, '').trim();
+            const aiData = JSON.parse(textResponse);
+            
             await prisma.transaction.update({
-            where: { id: txId },
-            data: { 
-                type: aiData.type, 
-                category: aiData.category, 
-                workspace: aiData.workspace, 
-                description: userText 
-            }
-        });
+                where: { id: txId },
+                data: { 
+                    type: aiData.type, 
+                    category: aiData.category, 
+                    workspace: aiData.workspace, 
+                    description: userText 
+                }
+            });
 
-            // 🎯 Відправляємо чисте HTML повідомлення замість сирого JSON
-          return ctx.replyWithHTML('✅ <b>Транзакцію та її тип успішно оновлено!</b>');
+            // 🎯 Відправляємо повідомлення ТІЛЬКИ ПІСЛЯ оновлення в базі
+            return ctx.replyWithHTML('✅ <b>Транзакцію та її тип успішно оновлено!</b>');
         } catch (e) {
             console.error('Помилка оновлення уточнення:', e);
             return ctx.reply('Не вдалося оновити транзакцію.');
