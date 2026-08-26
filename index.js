@@ -406,10 +406,11 @@ bot.command('add', async (ctx) => {
         let result;
         try {
             result = await model.generateContent(prompt);
-        } catch (retryErr) {
-            await new Promise(res => setTimeout (res, 1000));
-            result = await model.generateContent(prompt);
-        }
+        } catch (err) {
+    console.warn('⚠️ Первинний запит Gemini не вдався, робимо повтор...', err.message);
+    await new Promise(res => setTimeout(res, 1000));
+    result = await model.generateContent(prompt);
+}
 
         const textResponse = result.response.text().trim().replace(/```json/g, '').replace(/```/g, '').trim();
         const aiData = JSON.parse(textResponse);
@@ -590,9 +591,9 @@ bot.on('text', async (ctx) => {
             let result;
             try {
                 result = await model.generateContent(prompt);
-            } catch (retryErr) {
-                console.warn('⚠️ Тимчасове перевантаження Gemini (503), робимо повторний запит...');
-                await new Promise(res => setTimeout(res, 1000)); // пауза 1 секунда
+            } catch (err) {
+                console.warn('⚠️ Первинний запит Gemini не вдався, робимо повтор...', err.message);
+                await new Promise(res => setTimeout(res, 1000));
                 result = await model.generateContent(prompt);
             }
 
@@ -675,8 +676,8 @@ bot.on('text', async (ctx) => {
         let adviceResult;
         try {
             adviceResult = await chat.sendMessage(userText);
-        } catch (retryErr) {
-            console.warn('⚠️ Тимчасове перевантаження Gemini (503) у Раднику, пауза 1 сек...');
+        } catch (err) {
+            console.warn('⚠️ Первинний запит Gemini не вдався, робимо повтор...', err.message);
             await new Promise(res => setTimeout(res, 1000));
             adviceResult = await chat.sendMessage(userText);
         }
@@ -713,6 +714,12 @@ app.post('/monobank', async (req, res) => {
     const description = item.description || 'Транзакція Monobank';
     const isIncome = item.amount > 0;
     const monoId = item.id;
+
+// Якщо це тестовий webhook з REST Client — зупиняємо виконання
+    if (monoId && monoId.startsWith('test_')) {
+        console.log('🧪 Тестовий вебхук успішно прийнято!');
+        return;
+    }
 
     try {
         // ВИПРАВЛЕНО: Перевірка на дублікати (якщо такий monoId вже є, ігноруємо)
