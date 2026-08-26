@@ -353,6 +353,78 @@ bot.command('getdebt', async (ctx) => {
 
 bot.command('stats', showStats);
 
+// --- РУЧНЕ ДОДАВАННЯ ТРАНЗАКЦІЇ /add ---
+bot.command('add', async (ctx) => {
+    const userId = ctx.from.id;
+    delete userStates[userId]; // Скасовуємо редагування про всяк випадок
+
+    const text = ctx.message.text.replace('/add', '').trim();
+    if (!text) {
+        return ctx.replyWithHTML('⚠️ <b>Формат:</b> <code>/add &lt;сума&gt; &lt;опис&gt;</code>\nНаприклад: <code>/add 40 Вода в Рідному Краї</code>');
+    }
+
+    const parts = text.split(' ');
+    const amount = parseFloat(parts[0]);
+    if (isNaN(amount)) {
+        return ctx.replyWithHTML('⚠️ Вкажи суму першим числом.\nНаприклад: <code>/add 40 Вода в Рідному Краї</code>');
+    }
+
+    const description = parts.slice(1).join(' ') || 'Ручна витрата';
+    const statusMsg = await ctx.reply('⏳ Записую витрату...');
+
+    try {
+        const model = genAI.getGenerativeModel({ model: "gemini-3.5-flash" });
+        const prompt = `Проаналізуй фінансову витрату користувача: "${description}", сума: ${amount}.
+
+Визнач type ("expense", "income", "saving"), category (коротко 1-2 слова) та workspace ("Особисте" або "Проєкт").
+Формат JSON: {"type": "expense", "category": "...", "workspace": "..."}`;
+
+        //Rerty механізм для Google API
+        let result;
+        try {
+            result = await model.generateContent(prompt);
+        } catch (retryErr) {
+            await new Promise(res => setTimeout (res, 1000));
+            result = await model.generateContent(prompt);
+        }
+
+        const textResponse = result.response.text().trim().replace(/```json/g, '').replace(/```/g, '').trim();
+        const aiData = JSON.parse(textResponse);
+
+        await prisma.transaction.create({
+            data: {
+                type: aiData.type || 'expense',
+                amount: amount,
+                category: aiData.category || 'Загальне',
+                description: description,
+                workspace: aiData.workspace || 'Особисте'
+            }
+        });
+
+        return await ctx.telegram.editMessageText(
+            ctx.chat.id,
+            statusMsg.message_id,
+            null,
+            `✅ <b>Витрату успішно додано!</b>\n\n💵 <b>Сума:</b> <code>${amount.toFixed(2)}</code> грн\n🏷 <b>Категорія:</b> ${aiData.category}\n📦 <b>Простір:</b> ${aiData.workspace}\n📝 <b>Опис:</b> <i>${escapeHtml(description)}</i>`,
+            { parse_mode: 'HTML' }
+        );
+    } catch (e) {
+        console.error('Помилка /add', e);
+        // Фоллбек: якщо Gemini повністю впав, зберігаємо просто як "Загальне"
+        await prisma.transaction.create({
+            data: {type: 'expense', amount: amount, category: 'Загальне', description: description, workspace: 'Особисте' }
+        });
+        return await ctx.telegram.editMessageText(
+            ctx.chat.id,
+            statusMsg.message_id,
+            null,
+            `✅ <b>Витрату додано!</b> (Категорія: Загальне, AI недоступний)\n💵 <b>Сума:</b> <code>${amount.toFixed(2)}</code> грн`,
+            { parse_mode: 'HTML' }
+        );
+    }
+
+});
+
 // --- ФУНКЦІЇ ПАМ'ЯТІ ЧАТУ ---
 
 // 1. Збереження повідомлення в базу
@@ -430,6 +502,12 @@ bot.action(/^edit_(\d+)$/, async (ctx) => {
 bot.on('text', async (ctx) => {
     const userId = ctx.from.id;
     const userText = ctx.message.text;
+
+    //ЗАХИСТ: Якщо це команда, скасовуємо будь-яке редагування і виходимо
+    if (userText.startsWith('/')) {
+        delete userStates[userId];
+        return;
+    }
 
     console.log(`📩 Нове повідомлення від ${userId}: "${userText}"`);
 
@@ -545,7 +623,15 @@ bot.on('text', async (ctx) => {
             history: history
         });
 
-        const adviceResult = await chat.sendMessage(userText);
+        let adviceResult;
+        try {
+            adviceResult = await chat.sendMessage(userText);
+        } catch (retryErr) {
+            console.warn('⚠️ Тимчасове перевантаження Gemini (503) у Раднику, пауза 1 сек...');
+            await new Promise(res => setTimeout(res, 1000));
+            adviceResult = await chat.sendMessage(userText);
+        }
+
         let safeResponse = cleanAiResponse(adviceResult.response.text())
             .replace(/<h[1-6]>/g, '<b>')
             .replace(/<\/h[1-6]>/g, '</b>\n')
