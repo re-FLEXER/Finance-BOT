@@ -332,7 +332,13 @@ bot.action('start_reset_confirm', async (ctx) => {
     );
 });
 
-bot.action('cancel_reset', async (ctx) => { await ctx.editMessageText('Очищення скасовано.'); });
+bot.action('cancel_reset', async (ctx) => {
+    await ctx.answerCbQuery();
+    const userId = ctx.from.id;
+    if (userStates[userId]) delete userStates[userId].awaitingResetConfirm;
+
+    await ctx.editMessageText('🛑 <b>Операцію з очищення даних скасовано.</b> Усі фінанси в безпеці.', { parse_mode: 'HTML' });
+});
 
 bot.command('debt', async (ctx) => {
     const text = ctx.message.text.replace('/debt', '').trim();
