@@ -303,16 +303,33 @@ bot.command('setsavings', async (ctx) => {
     await ctx.reply(`✅ Збереження успішно синхронізовано! Тепер у скарбничці: ${targetAmount} грн.`);
 });
 
+// БЕЗПЕЧНЕ СКИДАННЯ БАЗИ (2FA Reset) ---
 bot.command('reset', async (ctx) => {
-    await ctx.reply('⚠️ Ти дійсно хочеш повністю очистити всі транзакції та борги?', Markup.inlineKeyboard([
-        [Markup.button.callback('✅ Так, очистити все', 'confirm_reset'), Markup.button.callback('❌ Скасувати', 'cancel_reset')]
-    ]));
+    const userId = ctx.from.id;
+    delete userStates[userId];
+
+    await ctx.reply('⚠️ <b>УВАГА!</b> Ви дійсно хочете повністю очистити всі дані фінансового обліку та історію?', {
+       parse_mode: 'HTML',
+       ...Markup.inlineKeyboard([
+        [
+            Markup.button.callback('✅ Так, продовжити', 'start_reset_confirm'),
+            Markup.button.callback('❌ Ні, скасувати', 'cancel_reset')
+        ]
+       ]) 
+    });
 });
 
-bot.action('confirm_reset', async (ctx) => {
-    await prisma.transaction.deleteMany({});
-    await prisma.chatHistory.deleteMany({}); // <-- Додано очищення історії
-    await ctx.editMessageText('🗑 База даних та історія чату повністю очищені! Вкажи новий початковий залишок через /setbalance.');
+bot.action('start_reset_confirm', async (ctx) => {
+    await ctx.answerCbQuery();
+    const userId = ctx.from.id;
+
+    //Включаємо стан очікування кодового слова
+    userStates[userId] = { awaitingResetConfirm: true};
+
+    await ctx.editMessageText(
+       '🚨 <b>ОСТАННЄ ПІДТВЕРДЖЕННЯ!</b>\n\nДля остаточного видалення всіх транзакцій та історії напишіть у чат фразу:\n<code>ОЧИСТИТИ ДАНІ</code>',
+        { parse_mode: 'HTML' } 
+    );
 });
 
 bot.action('cancel_reset', async (ctx) => { await ctx.editMessageText('Очищення скасовано.'); });
@@ -507,6 +524,32 @@ bot.on('text', async (ctx) => {
     if (userText.startsWith('/')) {
         delete userStates[userId];
         return;
+    }
+
+    if (userStates[userId] && userStates[userId].awaitingResetConfirm) {
+        if (userText.trim() === 'ОЧИСТИТИ ДАНІ') {
+            delete userStates[userId];
+            const statusMsg = await ctx.reply('⏳ Очищаю базу даних та історію...');
+
+            try {
+                await prisma.transaction.deleteMany({});
+                await prisma.chatHistory.deleteMany({});
+
+                return await ctx.telegram.editMessageText(
+                    ctx.chat.id,
+                    statusMsg.message_id,
+                    null,
+                    '🗑 <b>Базу даних та історію успішно очищено в 0!</b>\nВстанови новий початковий залишок через /setbalance.',
+                    { parse_mode: 'HTML' }
+                );
+            } catch (e) {
+                console.error('Помилка очищення: ', e);
+                return await ctx.reply('❌ Помилка при очищенні бази.');
+            }
+        } else {
+            delete userStates[userId].awaitingResetConfirm;
+            return await ctx.reply('🛑 <b>Текст введено невірно!</b> Операцію з очищення даних скасовано.', { parse_mode: 'HTML' });
+        }
     }
 
     console.log(`📩 Нове повідомлення від ${userId}: "${userText}"`);
