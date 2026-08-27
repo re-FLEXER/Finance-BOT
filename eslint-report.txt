@@ -35,11 +35,8 @@ Config File: eslint.config.mjs
 --------------------------------------------------------------------------------
 
 D:\I\My WORKS\Financial Telegram Bot + AI + Monobank\index.js
-  409:18  warning  'retryErr' is defined but never used  no-unused-vars
-  593:22  warning  'retryErr' is defined but never used  no-unused-vars
-  678:18  warning  'retryErr' is defined but never used  no-unused-vars
+  
 
-✖ 3 problems (0 errors, 3 warnings)
 
 --------------------------------------------------------------------------------
 3. ОЦІНКА БЕЗПЕКИ ТА СТАБІЛЬНОСТІ КОДУ
