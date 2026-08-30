@@ -26,3 +26,10 @@ model ChatHistory {
   text      String
   createdAt DateTime @default(now())
 }
+
+model ReportQueue{
+  id       Int      @id @default(autoincrement())
+  prompt   String
+  status    String   @default("PENDING")
+  createdAt DateTime @default(now())
+}

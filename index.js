@@ -4,6 +4,7 @@ const cron = require('node-cron');
 const { Telegraf, Markup } = require('telegraf');
 const { PrismaClient } = require('@prisma/client');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
+const { generateTextWithFallback } = require('./check-groq');
 
 const app = express();
 app.use(express.json());
@@ -829,8 +830,6 @@ async function getDailyReportData() {
 // --- Генерація 5-компонентного AI-аналізу (Gemini) ---
 async function generateDailyAiAnalysis(dailyData) {
     try {
-        const model = genAI.getGenerativeModel({ model: "gemini-3.5-flash"});
-
         //1. Отримуємо транзакції за останні 7 днів для порівняння з середнім чеком
         const sevenDaysAgo = new Date();
         sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
@@ -860,7 +859,7 @@ async function generateDailyAiAnalysis(dailyData) {
         КОНТЕКСТ ДЛЯ ПОРІВНЯННЯ:
         - Середні денні витрати за останні 7 днів: ${avgDailyExpense.toFixed(2)} грн
 
-        СФОРМУЙ ВІДПОВІДЬ ЗА ТАКИМИ 5 ПУНКТАМИ (використовуй емодзі, будь дружнім, але практичним):
+        СФОРМУЙ ВІДПОВІДЬ ЗА ТАКИМИ 4 ПУНКТАМИ (використовуй емодзі, будь дружнім, але практичним):
         1. **Порівняння:** Порівняй сьогоднішні витрати із середніми за тиждень (${avgDailyExpense.toFixed(2)} грн).
         2. **Структура:** Оціни, на що пішли гроші (чи були це імпульсивні витрати, чи необхідні). Якщо витрат 0 — похвали за "сухий день".
         3. **Заощадження/Капітал:** Коротка порада щодо збережень або балансу.
@@ -869,17 +868,18 @@ async function generateDailyAiAnalysis(dailyData) {
         Пиши українською мовою, без складних термінів, стисло та по суті.
         `;
 
-        const result = await model.generateContent(prompt);
-        return result.response.text().trim();
+        //Виклики Gemini з авто-переключенням на Groq при помилці 503
+        const resultText = await generateTextWithFallback(prompt);
+        return resultText;
     } catch (error) {
-        console.error('Помилка генерації AI аналізу:', error);
-        return "Не вдалося згенерувати AI-аналіз за сьогодні.";
+        console.error('Помилка генерації AI аналізу (обидва AI впали):', error);
+        return "⚠️ Не вдалося згенерувати AI-аналіз через збій мережі AI.";
     }
 
 }
     
 // --- АВТОМАТИЧНИЙ ЩОДЕННИЙ ЗВІТ (Cron Job) ---
-cron.schedule('59 23 * * *', async () => {
+cron.schedule('54 23 * * *', async () => {
     console.log('⏰ Запуск вечірнього звіту...');
     try {
         const data = await getDailyReportData();
@@ -896,8 +896,23 @@ cron.schedule('59 23 * * *', async () => {
             categoriesText += `  • ${escapeHtml(cat)}: <code>${sum.toFixed(2)}</code> грн\n`;
         }
 
-        const rawAiAnalysis = await generateDailyAiAnalysis(data);
-        const aiAnalysis = cleanAiResponse(rawAiAnalysis);
+        let aiAnalysis = '';
+        try {
+            // 1. Cпроба згенерувати AI-аналіз(Gemini => Hot Fallback Groq))
+            aiAnalysis = await generateDailyAiAnalysis(data);
+        } catch (aiError) {
+            console.error('🚨 Обидва AI-сервіси (Gemini та Groq) недоступні! Активація холодного резерву...', aiError.message);
+            
+            // 2. Фолбек: якщо обидва AI недоступні, збереження завдання в базу данних
+            await prisma.reportQueue.create({
+                data: {
+                    prompt: JSON.stringify(data),
+                    status: 'PENDING'
+                }
+            });
+
+            aiAnalysis = '⚠️ AI-аналітик тимчасово недоступний. Завдання збережено в чергу БД і буде опрацьовано автоматично пізніше.';
+        }
 
         const reportMessage = 
 `🌙 <b>ФІНАНСОВИЙ ПІДСУМОК ДНЯ — ${todayFormatted}</b>
@@ -918,6 +933,49 @@ ${aiAnalysis}`;
         await saveChatMessage(process.env.MY_CHAT_ID, 'model', reportMessage);
     } catch (error) {
         console.error('Помилка відправки авто-звіту:', error);
+    }
+}, {
+    timezone: "Europe/Kyiv"
+});
+
+// --- POLLING-КРОН ("Нічний старт") ---
+// Запускається кожні 30 хвилин для розбору накопичених задач з БД
+cron.schedule('*/30 * * * *', async () => {
+    try {
+        const pendingReports = await prisma.reportQueue.findMany({
+            where: { status: 'PENDING' }
+        });
+
+        if (pendingReports.length === 0) return;
+
+        console.log(` sweeping Нічний санітар: знайдено ${pendingReports.length} необроблених звітів.`);
+
+        for (const report of pendingReports) {
+            try {
+                const dailyData = JSON.parse(report.prompt);
+                const aiAnalysis = await generateDailyAiAnalysis(dailyData);
+
+                const reportMessage = 
+`🔄 <b>ДОДОПРАЦЬОВАНИЙ AI-АНАЛІЗ ЗВІТУ</b>
+━━━━━━━━━━━━━━━━━━
+🤖 <b>AI-Аналітик (із черги БД):</b>
+${cleanAiResponse(aiAnalysis)}`;
+
+                await bot.telegram.sendMessage(process.env.MY_CHAT_ID, reportMessage, { parse_mode: 'HTML' });
+                await saveChatMessage(process.env.MY_CHAT_ID, 'model', reportMessage);
+
+                await prisma.reportQueue.update({
+                    where: { id: report.id },
+                    data: { status: 'DONE' }
+                });
+
+                console.log(`✅ Завдання #${report.id} успішно оброблено.`);
+            } catch (itemError) {
+                console.error(`⚠️ Не вдалося обробити завдання #${report.id}:`, itemError.message);
+            }
+        }
+    } catch (error) {
+        console.error('Помилка виконання Polling-крону ("Нічний санітар"):', error);
     }
 }, {
     timezone: "Europe/Kyiv"
