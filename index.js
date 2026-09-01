@@ -4,7 +4,7 @@ const cron = require('node-cron');
 const { Telegraf, Markup } = require('telegraf');
 const { PrismaClient } = require('@prisma/client');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
-const { generateTextWithFallback } = require('./check-groq');
+const { generateTextWithFallback } = require('./fallback-ai');
 
 const app = express();
 app.use(express.json());
@@ -128,25 +128,53 @@ const getStatsData = async () => {
     let iOweTotal = 0, payDebtTotal = 0; 
     let oweMeTotal = 0, getDebtTotal = 0; 
 
-    allTransactions.forEach(t => {
+    //Баланси окремих джерел
+    let cardBalance = 0;
+    let cashBalance = 0;
+
+   allTransactions.forEach(t => {
+        const source = t.source || 'card';
+
         if (t.type === 'init_balance') {
             initBalance += t.amount;
+            cardBalance += t.amount;
         } else if (t.type === 'init_saving') {
-            initSaving += t.amount; // Тут іде стартова сума
+            initSaving += t.amount;
+            cashBalance += t.amount;
+        } else if (t.type === 'transfer') {
+            // Перекази (чистий рух коштів без створення реальних витрат чи доходів)
+            if (source === 'card' && t.toSource === 'cash') {
+                cardBalance -= t.amount;
+                cashBalance += t.amount;
+            } else if (source === 'cash' && t.toSource === 'card') {
+                cashBalance -= t.amount;
+                cardBalance += t.amount;
+            }
         } else if (t.workspace === 'Проєкт') {
-            if (t.type === 'income') wIncome += t.amount;
-            if (t.type === 'expense') wExpense += t.amount;
+            if (t.type === 'income') {
+                wIncome += t.amount;
+                if (source === 'cash') cashBalance += t.amount; else cardBalance += t.amount;
+            }
+            if (t.type === 'expense') {
+                wExpense += t.amount;
+                if (source === 'cash') cashBalance -= t.amount; else cardBalance -= t.amount;
+            }
         } else {
-            if (t.type === 'income') pIncome += t.amount;
-            if (t.type === 'expense') pExpense += t.amount;
-            if (t.type === 'saving') pSaving += t.amount; // Виправлено назад на pSaving
+            if (t.type === 'income') {
+                pIncome += t.amount;
+                if (source === 'cash') cashBalance += t.amount; else cardBalance += t.amount;
+            }
+            if (t.type === 'expense') {
+                pExpense += t.amount;
+                if (source === 'cash') cashBalance -= t.amount; else cardBalance -= t.amount;
+            }
+            if (t.type === 'saving') pSaving += t.amount; 
             if (t.type === 'i_owe') iOweTotal += t.amount;
             if (t.type === 'pay_debt') payDebtTotal += t.amount;
             if (t.type === 'owe_me') oweMeTotal += t.amount;
             if (t.type === 'get_debt') getDebtTotal += t.amount;
         }
     });
-
     const workProfit = wIncome - wExpense;
     const currentIOwe = iOweTotal - payDebtTotal;
     const currentOweMe = oweMeTotal - getDebtTotal;
@@ -163,7 +191,7 @@ const getStatsData = async () => {
     return {
         initBalance, pIncome, pExpense, pSaving: totalSavings, wIncome, wExpense,
         currentIOwe, currentOweMe, workProfit, personalBalance, totalCapital,
-        iOweTotal,payDebtTotal
+        iOweTotal,payDebtTotal, cardBalance, cashBalance
     };
 };
 
@@ -184,7 +212,8 @@ const showStats = async (ctx) => {
 🟢 <b>Доходи:</b> <code>${stats.pIncome.toFixed(2)}</code> грн
 🔴 <b>Витрати:</b> <code>${stats.pExpense.toFixed(2)}</code> грн
 🟡 <b>Збереження (Банка/Кеш):</b> <code>${stats.pSaving.toFixed(2)}</code> грн
-💳 <b>РЕАЛЬНИЙ ЗАЛИШОК (Картка):</b> <code>${stats.personalBalance.toFixed(2)}</code> грн
+💳 <b>РЕАЛЬНИЙ ЗАЛИШОК (Картка):</b> <code>${stats.cardBalance.toFixed(2)}</code> грн
+💵 <b>ГОТІВКА (Кеш):</b> <code>${stats.cashBalance.toFixed(2)}</code> грн
 🤝 <b>Мені винні (Актив):</b> <code>${stats.currentOweMe.toFixed(2)}</code> грн
 ⚠️ <b>Я винен (Пасив):</b> <code>${stats.currentIOwe.toFixed(2)}</code> грн
 ${hasDebt ? `📉 <b>Виплата боргу:</b> ${debtProgressBar}` : ''}
@@ -1020,3 +1049,43 @@ app.listen(PORT, async () => {
         console.log(`Telegram Webhook встановлено: ${fullWebhookUrl}`);
     }
 });
+
+// --- AI-РОУТЕР/КЛАСИФІКАТОР НАМІРІВ ---
+async function classifyUserIntent(userText) {
+    const prompt = `Ти — розумний класифікатор намірів для фінансового бота.
+Проаналізуй текст користувача: "${userText}".
+
+Твоє завдання — визначити, чи це транзакція, чи це звичайна розмова/запитання/фінансове порада.
+
+ВАРІАНТИ INTENT:
+1. "TRANSACTION" — якщо в тексті є чітка фінансова дія, сума або перекази між рахунками/готівкою (наприклад, "зняв 500 готівки", "купив каву 60", "поповнив кеш 1000", "зняв з картки 200").
+2. "CHAT" — якщо це запитання, розмова, фінансове аналізування, привітання ("порадь куди вкласти", "привіт", "скільки я витратив?").
+
+ЯКЩО INTENT = "TRANSACTION", визнач такі поля:
+- isTransaction: true
+- intent: "TRANSACTION"
+- amount: число (сума транзакції)
+- type: "expense" | "income" | "transfer" | "saving"
+- source: "card" | "cash" (звідки гроші). Якщо вказано тригери "кеш", "готівка", "готівкою", "паперові", "з рук" — ставимо "cash", інакше за замовчуванням "card".
+- toSource: "card" | "cash" | null (використовується ТІЛЬКИ якщо type = "transfer", наприклад при знятті готівки з картки: source="card", toSource="cash").
+- category: коротка категорія (1-2 слова)
+- workspace: "Особисте" або "Проєкт"
+- description: короткий опис
+
+ЯКЩО INTENT = "CHAT":
+- isTransaction: false
+- intent: "CHAT"
+
+ВІДПОВІДАЙ ВИКЛЮЧНО В ФОРМАТІ JSON без додаткових символів чи markdown.
+Приклад JSON для транзакції:
+{"isTransaction": true, "intent": "TRANSACTION", "amount": 500, "type": "transfer", "source": "card", "toSource": "cash", "category": "Зняття готівки", "workspace": "Особисте", "description": "Зняв 500 готівки"}
+`;
+
+    try {
+        const textResponse = await generateTextWithFallback(prompt);
+        const cleanJson = textResponse.trim().replace(/```json/g, '').replace(/```/g, '').trim();  
+    } catch (e) {
+        console.error('Помилка класифікації наміру користувача:', e);
+        return { isTransaction: false, intent: "CHAT" }; // Фолбек на звичайний чат
+    }
+}

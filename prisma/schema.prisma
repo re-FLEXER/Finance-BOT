@@ -17,6 +17,8 @@ model Transaction {
   workspace   String   @default("Особисте") // "Особисте" або "Проєкт"
   createdAt   DateTime @default(now())
   monoId      String?
+  source      String?  @default("card") // 'card' або 'cash' (звідки)
+  toSource    String?  // 'card' або 'cash' (куди, використовується тільки для type: 'transfer'
 }
 
 model ChatHistory {
@@ -33,3 +35,4 @@ model ReportQueue{
   status    String   @default("PENDING")
   createdAt DateTime @default(now())
 }
+
