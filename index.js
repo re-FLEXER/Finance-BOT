@@ -563,6 +563,8 @@ bot.on('text', async (ctx) => {
         return;
     }
 
+    bot.instent 
+
     if (userStates[userId] && userStates[userId].awaitingResetConfirm) {
         if (userText.trim() === 'ОЧИСТИТИ ДАНІ') {
             delete userStates[userId];
