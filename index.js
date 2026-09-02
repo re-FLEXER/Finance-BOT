@@ -770,6 +770,12 @@ app.post('/monobank', async (req, res) => {
         const existingTx = await prisma.transaction.findFirst({ where: { monoId: monoId } });
         if (existingTx) return;
 
+// 🛑 ФІЛЬТР: Ігноруємо парні зарахування на Банку/депозит
+        if (isIncome && (description.toLowerCase().includes('на депозит') || description.toLowerCase().includes('банка'))) {
+            console.log('ℹ️ Ігноруємо парне зарахування на Банку/депозит');
+            return;
+        }
+
         // ДЕТЕКТОР ЗНЯТТЯ ГОТІВКИ (Спліт без AI)
         const isCashWithdrawal = description.toLowerCase().includes('зняття готівки') || 
                                  description.toLowerCase().includes('банкомат') || 
@@ -822,14 +828,14 @@ app.post('/monobank', async (req, res) => {
         let aiData = { type: isIncome ? 'income' : 'expense', category: 'Загальне', workspace: 'Особисте' };
 
         try {
-            const prompt = `Проаналізуй фінансову транзакцію. 
+           const prompt = `Проаналізуй фінансову транзакцію. 
 Опис: "${description}". Сума: ${amount}. Зарахування: ${isIncome}.
 
 ТИ ПОВИНЕН ОБРАТИ TYPE ТІЛЬКИ З ЦЬОГО СПИСКУ ЗА СУВОРИМИ ПРАВИЛАМИ:
-1. Переміщення активів -> type: "saving" (Зняття готівки, переказ на свою банку, крипта).
+1. Переміщення активів -> type: "saving" або "transfer" (Якщо опис містить "банка", "депозит", "накопичення" чи "з чорної картки" при поповненні банки — СТАКАТИ "saving").
 2. Справжні витрати -> type: "expense" (Покупки, їжа, підписки).
 3. Справжній дохід -> type: "income" (Зарплата, дохід від продажу).
-4. Логіка боргів: "i_owe" (взяв борг), "owe_me" (дав борг), "pay_debt" (віддаєш свій борг), "get_debt" (тобі повертають).
+4. Логіка боргів: "i_owe", "owe_me", "pay_debt", "get_debt".
 
 ПРАВИЛА ДЛЯ WORKSPACE ("Проєкт" або "Особисте"):
 - "Проєкт": Все, що стосується IT, Node.js, Telegram-ботів, poster.baza та фрілансу.
