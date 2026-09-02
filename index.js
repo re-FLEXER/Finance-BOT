@@ -165,7 +165,11 @@ const getStatsData = async () => {
                 pExpense += t.amount;
                 if (source === 'cash') cashBalance -= t.amount; else cardBalance -= t.amount;
             }
-            if (t.type === 'saving') pSaving += t.amount; 
+            if (t.type === 'saving') {
+                pSaving += t.amount;
+                //ФІКС: Збереження в Банку зменшують картку (або кеш)!
+                if (source === 'cash') cashBalance -= t.amount; else cardBalance -= t.amount;
+            } 
             if (t.type === 'i_owe') iOweTotal += t.amount;
             if (t.type === 'pay_debt') {
                 payDebtTotal += t.amount;
@@ -747,7 +751,7 @@ bot.on('text', async (ctx) => {
     }
 });
 
-// --- ВЕБХУК МОНОБАНКУ (З ЗАХИСТОМ ВІД ЗБОЇВ ТА СПЛІТ-ЛОГІКОЮ) ---
+// --- ВЕБХУК МОНОБАНКУ (З ЖОРСТКИМ ФІЛЬТРОМ ПАРНИХ БАНК) ---
 app.post('/monobank', async (req, res) => {
     res.status(200).send('OK'); 
     
@@ -770,15 +774,23 @@ app.post('/monobank', async (req, res) => {
         const existingTx = await prisma.transaction.findFirst({ where: { monoId: monoId } });
         if (existingTx) return;
 
-// 🛑 ФІЛЬТР: Ігноруємо парні зарахування на Банку/депозит
-        if (isIncome && (description.toLowerCase().includes('на депозит') || description.toLowerCase().includes('банка'))) {
-            console.log('ℹ️ Ігноруємо парне зарахування на Банку/депозит');
+        // 🛑 ЗАЛІЗОБЕТОННИЙ ФІЛЬТР: Ігноруємо парне зарахування (+) на Банку/депозит
+        const lowerDesc = description.toLowerCase();
+        const isJarDeposit = isIncome && (
+            lowerDesc.includes('депозит') || 
+            lowerDesc.includes('банка') || 
+            lowerDesc.includes('накопичен') ||
+            item.mcc === 4829 || item.mcc === 6012
+        );
+
+        if (isJarDeposit) {
+            console.log(`ℹ️ Ігноруємо парне зарахування на Банку/депозит: "${description}"`);
             return;
         }
 
         // ДЕТЕКТОР ЗНЯТТЯ ГОТІВКИ (Спліт без AI)
-        const isCashWithdrawal = description.toLowerCase().includes('зняття готівки') || 
-                                 description.toLowerCase().includes('банкомат') || 
+        const isCashWithdrawal = lowerDesc.includes('зняття готівки') || 
+                                 lowerDesc.includes('банкомат') || 
                                  item.mcc === 6011;
 
         if (isCashWithdrawal) {
@@ -828,7 +840,7 @@ app.post('/monobank', async (req, res) => {
         let aiData = { type: isIncome ? 'income' : 'expense', category: 'Загальне', workspace: 'Особисте' };
 
         try {
-           const prompt = `Проаналізуй фінансову транзакцію. 
+            const prompt = `Проаналізуй фінансову транзакцію. 
 Опис: "${description}". Сума: ${amount}. Зарахування: ${isIncome}.
 
 ТИ ПОВИНЕН ОБРАТИ TYPE ТІЛЬКИ З ЦЬОГО СПИСКУ ЗА СУВОРИМИ ПРАВИЛАМИ:
