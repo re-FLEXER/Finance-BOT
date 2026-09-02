@@ -123,16 +123,15 @@ const getStatsData = async () => {
     const allTransactions = await prisma.transaction.findMany();
     
     let initBalance = 0;
-    let initSaving = 0; // Додана змінна
+    let initSaving = 0;
     let pIncome = 0, pExpense = 0, pSaving = 0, wIncome = 0, wExpense = 0;
     let iOweTotal = 0, payDebtTotal = 0; 
     let oweMeTotal = 0, getDebtTotal = 0; 
 
-    //Баланси окремих джерел
     let cardBalance = 0;
     let cashBalance = 0;
 
-   allTransactions.forEach(t => {
+    allTransactions.forEach(t => {
         const source = t.source || 'card';
 
         if (t.type === 'init_balance') {
@@ -140,9 +139,7 @@ const getStatsData = async () => {
             cardBalance += t.amount;
         } else if (t.type === 'init_saving') {
             initSaving += t.amount;
-            cashBalance += t.amount;
         } else if (t.type === 'transfer') {
-            // Перекази (чистий рух коштів без створення реальних витрат чи доходів)
             if (source === 'card' && t.toSource === 'cash') {
                 cardBalance -= t.amount;
                 cashBalance += t.amount;
@@ -170,28 +167,33 @@ const getStatsData = async () => {
             }
             if (t.type === 'saving') pSaving += t.amount; 
             if (t.type === 'i_owe') iOweTotal += t.amount;
-            if (t.type === 'pay_debt') payDebtTotal += t.amount;
-            if (t.type === 'owe_me') oweMeTotal += t.amount;
-            if (t.type === 'get_debt') getDebtTotal += t.amount;
+            if (t.type === 'pay_debt') {
+                payDebtTotal += t.amount;
+                cardBalance -= t.amount; // Виплата боргу зменшує картку
+            }
+            if (t.type === 'owe_me') {
+                oweMeTotal += t.amount;
+                cardBalance -= t.amount; // Дав у борг — зменшує картку
+            }
+            if (t.type === 'get_debt') {
+                getDebtTotal += t.amount;
+                cardBalance += t.amount; // Повернули борг — збільшує картку
+            }
         }
     });
+
     const workProfit = wIncome - wExpense;
     const currentIOwe = iOweTotal - payDebtTotal;
     const currentOweMe = oweMeTotal - getDebtTotal;
 
-    // Від картки віднімаються ТІЛЬКИ фізичні перекази на банку (pSaving)
-    const personalBalance = initBalance + (pIncome + wIncome) - (pExpense + wExpense) - oweMeTotal + getDebtTotal - payDebtTotal;
-    
-    // Збираємо всі збереження разом (стартові + поповнення)
     const totalSavings = initSaving + pSaving; 
-    
-    // Загальний капітал (Картка + Банка)
-    const totalCapital = personalBalance + totalSavings; 
+    // Загальний капітал = реальна картка + реальна готівка + банки/збереження
+    const totalCapital = cardBalance + cashBalance + totalSavings; 
 
     return {
         initBalance, pIncome, pExpense, pSaving: totalSavings, wIncome, wExpense,
-        currentIOwe, currentOweMe, workProfit, personalBalance, totalCapital,
-        iOweTotal,payDebtTotal, cardBalance, cashBalance
+        currentIOwe, currentOweMe, workProfit, personalBalance: cardBalance, totalCapital,
+        iOweTotal, payDebtTotal, cardBalance, cashBalance
     };
 };
 
@@ -277,36 +279,35 @@ bot.command('setbalance', async (ctx) => {
 bot.command('sync', async (ctx) => {
     const args = ctx.message.text.split(' ');
     const realAmount = parseFloat(args[1]);
-    if (isNaN(realAmount)) return ctx.reply('⚠️ Формат: /sync <сума на картці>. Наприклад: /sync 99.60');
+    if (isNaN(realAmount)) return ctx.reply('⚠️ Формат: /sync <сума на картці>. Наприклад: /sync 358.36');
 
-    const allTransactions = await prisma.transaction.findMany();
-    let initBalanceId = null;
-    let pIncome = 0, pExpense = 0, wIncome = 0, wExpense = 0;
-    let payDebtTotal = 0, oweMeTotal = 0, getDebtTotal = 0;
+    // 1. Отримуємо актуальні розраховані баланси
+    const stats = await getStatsData();
+    
+    // 2. Вираховуємо різницю між тим, що є зараз на картці в боті, та реальністю
+    const diff = realAmount - stats.cardBalance;
 
-    allTransactions.forEach(t => {
-        if (t.type === 'init_balance') {
-            initBalanceId = t.id;
-        } else if (t.workspace === 'Проєкт') {
-            if (t.type === 'income') wIncome += t.amount;
-            if (t.type === 'expense') wExpense += t.amount;
-        } else {
-            if (t.type === 'income') pIncome += t.amount;
-            if (t.type === 'expense') pExpense += t.amount;
-            if (t.type === 'pay_debt') payDebtTotal += t.amount;
-            if (t.type === 'owe_me') oweMeTotal += t.amount;
-            if (t.type === 'get_debt') getDebtTotal += t.amount;
-        }
-    });
+    // 3. Знаходимо існуючий початковий залишок
+    const initTx = await prisma.transaction.findFirst({ where: { type: 'init_balance' } });
 
-    const newInitBalance = realAmount - (pIncome + wIncome) + (pExpense + wExpense) + oweMeTotal - getDebtTotal + payDebtTotal;
-
-    if (initBalanceId) {
-        await prisma.transaction.update({ where: { id: initBalanceId }, data: { amount: newInitBalance } });
+    if (initTx) {
+        await prisma.transaction.update({ 
+            where: { id: initTx.id }, 
+            data: { amount: initTx.amount + diff } 
+        });
     } else {
-        await prisma.transaction.create({ data: { type: 'init_balance', amount: newInitBalance, category: 'Синхронізація', workspace: 'Особисте' } });
+        await prisma.transaction.create({ 
+            data: { 
+                type: 'init_balance', 
+                amount: diff, 
+                category: 'Початковий залишок', 
+                description: 'Синхронізація балансу', 
+                workspace: 'Особисте' 
+            } 
+        });
     }
-    await ctx.reply(`✅ Синхронізовано! Математику вирівняно під ${realAmount} грн.\nСтатистика витрат та доходів повністю збережена.`);
+
+    await ctx.reply(`✅ Синхронізовано! Баланс картки вирівняно під ${realAmount.toFixed(2)} грн.\nУсі доходи та витрати повністю збережені.`);
 });
 
 bot.command('setsavings', async (ctx) => {
