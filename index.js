@@ -557,14 +557,13 @@ bot.on('text', async (ctx) => {
     const userId = ctx.from.id;
     const userText = ctx.message.text;
 
-    //ЗАХИСТ: Якщо це команда, скасовуємо будь-яке редагування і виходимо
+    // ЗАХИСТ: Якщо це команда, скасовуємо будь-яке редагування і виходимо
     if (userText.startsWith('/')) {
         delete userStates[userId];
         return;
     }
 
-    bot.instent 
-
+    // 1. СТАН: Підтвердження скидання даних (2FA Reset)
     if (userStates[userId] && userStates[userId].awaitingResetConfirm) {
         if (userText.trim() === 'ОЧИСТИТИ ДАНІ') {
             delete userStates[userId];
@@ -591,46 +590,32 @@ bot.on('text', async (ctx) => {
         }
     }
 
-    console.log(`📩 Нове повідомлення від ${userId}: "${userText}"`);
-
-    // 1. Режим "Уточнити"
+    // 2. СТАН: Режим "Уточнити"
     if (userStates[userId] && userStates[userId].isEditing) {
         const txId = userStates[userId].txId;
         delete userStates[userId];
 
-        // ⚡ UX-Фікс: Миттєва відповідь користувачу, щоб прибрати візуальну затримку
         const statusMsg = await ctx.reply('⏳ Аналізую новий опис та оновлюю категорію...');
 
-
         try {
-            const model = genAI.getGenerativeModel({ model: "gemini-3.5-flash" });
             const prompt = `Проаналізуй фінансову транзакцію. 
 Користувач написав / Опис транзакції: "${userText}".
 
 ТИ ПОВИНЕН ОБРАТИ TYPE ТІЛЬКИ З ЦЬОГО СПИСКУ ЗА СУВОРИМИ ПРАВИЛАМИ:
-1. Переміщення активів -> type: "saving" (Зняття готівки, переказ на свою банку, крипта).
-2. Справжні витрати -> type: "expense" (Покупки, їжа, підписки).
-3. Справжній дохід -> type: "income" (Зарплата, дохід від продажу).
-4. Логіка боргів: "i_owe" (взяв борг), "owe_me" (дав борг), "pay_debt" (віддаєш свій борг), "get_debt" (тобі повертають).
+1. Переміщення активів -> type: "saving" або "transfer".
+2. Справжні витрати -> type: "expense".
+3. Справжній дохід -> type: "income".
+4. Логіка боргів: "i_owe", "owe_me", "pay_debt", "get_debt".
 
 ПРАВИЛА ДЛЯ WORKSPACE ("Проєкт" або "Особисте"):
 - "Проєкт": Все, що стосується IT, Node.js, Telegram-ботів, poster.baza та фрілансу.
 - "Особисте": Спортзал, кіно, побут, переміщення готівки.
 
 Визнач type, category (коротко, 1-2 слова) та workspace. Формат JSON: {"type": "...", "category": "...", "workspace": "..."}`;
-            
-            // 🔄 Автоматичний повтор запиту (Retry) якщо Google видав 503      
-            let result;
-            try {
-                result = await model.generateContent(prompt);
-            } catch (err) {
-                console.warn('⚠️ Первинний запит Gemini не вдався, робимо повтор...', err.message);
-                await new Promise(res => setTimeout(res, 1000));
-                result = await model.generateContent(prompt);
-            }
 
-            const textResponse = result.response.text().trim().replace(/```json/g, '').replace(/```/g, '').trim();
-            const aiData = JSON.parse(textResponse);
+            const textResponse = await generateTextWithFallback(prompt);
+            const cleanJson = textResponse.replace(/```json/g, '').replace(/```/g, '').trim();
+            const aiData = JSON.parse(cleanJson);
             
             await prisma.transaction.update({
                 where: { id: txId },
@@ -642,12 +627,11 @@ bot.on('text', async (ctx) => {
                 }
             });
 
-            // 🎯 Редагуємо статусне повідомлення на успіх
             return await ctx.telegram.editMessageText(
                 ctx.chat.id,
                 statusMsg.message_id,
                 null,
-                `✅ <b>Транзакцію успішно оновлено!</b>\n🏷 <b>Категорія:</b> ${aiData.category}\n📦 <b>Простір:</b> ${aiData.workspace}`,
+                `✅ <b>Транзакцію успішно оновлено!</b>\n🏷 <b>Категорія:</b> ${escapeHtml(aiData.category)}\n📦 <b>Простір:</b> ${aiData.workspace}`,
                 { parse_mode: 'HTML' }
             );
         } catch (e) {
@@ -661,18 +645,50 @@ bot.on('text', async (ctx) => {
         }
     }
 
-    // 2. AI Радник з інтегрованою пам'яттю (Chat History) та контекстом фінансів
+    console.log(`📩 Нове повідомлення від ${userId}: "${userText}"`);
+
+    // 3. AI-РОУТЕР: Автоматична перевірка на транзакцію у звичайному тексті
+    const intentData = await classifyUserIntent(userText);
+
+    if (intentData && intentData.isTransaction && typeof intentData.amount === 'number') {
+        const savedTx = await prisma.transaction.create({
+            data: {
+                type: intentData.type || 'expense',
+                amount: intentData.amount,
+                source: intentData.source || 'card',
+                toSource: intentData.toSource || null,
+                category: intentData.category || 'Загальне',
+                description: intentData.description || userText,
+                workspace: intentData.workspace || 'Особисте'
+            }
+        });
+
+        const icon = intentData.type === 'income' ? '🟢' : intentData.type === 'transfer' ? '🔁' : '🔴';
+        const sourceInfo = intentData.type === 'transfer' 
+            ? ` (${intentData.source === 'card' ? '💳' : '💵'} ➔ ${intentData.toSource === 'cash' ? '💵' : '💳'})`
+            : ` (${intentData.source === 'cash' ? '💵 Готівка' : '💳 Картка'})`;
+
+        return await ctx.replyWithHTML(
+            `✅ <b>Транзакцію зафіксовано!</b>\n\n` +
+            `${icon} <b>Сума:</b> <code>${intentData.amount.toFixed(2)}</code> грн${sourceInfo}\n` +
+            `🏷 <b>Категорія:</b> ${escapeHtml(intentData.category)}\n` +
+            `📦 <b>Простір:</b> ${intentData.workspace}\n` +
+            `📝 <b>Опис:</b> <i>${escapeHtml(intentData.description || userText)}</i>`,
+            Markup.inlineKeyboard([[Markup.button.callback('✏️ Уточнити', `edit_${savedTx.id}`)]])
+        );
+    }
+
+    // 4. AI-РАДНИК: Обробка запитань, розмов та фінансових аналізів
     const waitMsg = await ctx.reply('⏳ Аналізую ваші фінанси...');
     try {
         const stats = await getStatsData();
         
-        // Зчитуємо історію з перевіркою на масив
         let rawHistory = await getChatHistory(userId);
         let history = Array.isArray(rawHistory) ? rawHistory : [];
 
-        // --- ФІКС: Gemini вимагає, щоб масив починався ТІЛЬКИ з 'user' ---
+        // Перевірка: масив має починатися з 'user' для Gemini SDK
         while (history.length > 0 && history[0].role !== 'user') {
-            history.shift(); // Видаляємо найстаріше повідомлення, якщо це 'model'
+            history.shift();
         }
 
         console.log(`📜 Завантажено елементів історії для Gemini: ${history.length}`);
@@ -693,14 +709,11 @@ bot.on('text', async (ctx) => {
 4. Якщо користувач хоче зробити витрату, але має борги чи малий баланс — підсвіти це як ризик.
 `;
 
-        // Ініціалізація чату
-       // 1. Ініціалізуємо модель з іншою назвою змінної (advisorModel)
         const advisorModel = genAI.getGenerativeModel({ 
             model: "gemini-3.5-flash",
             systemInstruction: systemInstruction 
         });
 
-        // 2. Ініціалізація чату
         const chat = advisorModel.startChat({
             history: history
         });
@@ -719,11 +732,9 @@ bot.on('text', async (ctx) => {
             .replace(/<\/h[1-6]>/g, '</b>\n')
             .replace(/\*/g, '');
 
-        // 3. Відправляємо відповідь користувачу
         await ctx.telegram.deleteMessage(ctx.chat.id, waitMsg.message_id);
         await ctx.replyWithHTML(`🎩 <b>ТВІЙ РАДНИК:</b>\n\n${safeResponse}`);
 
-        // 4. Зберігаємо обидва повідомлення в Supabase
         await saveChatMessage(userId, 'user', userText);
         await saveChatMessage(userId, 'model', safeResponse);
 
@@ -735,31 +746,82 @@ bot.on('text', async (ctx) => {
     }
 });
 
-// --- ВЕБХУК МОНОБАНКУ ---
+// --- ВЕБХУК МОНОБАНКУ (З ЗАХИСТОМ ВІД ЗБОЇВ ТА СПЛІТ-ЛОГІКОЮ) ---
 app.post('/monobank', async (req, res) => {
     res.status(200).send('OK'); 
-    const data = req.body.data;
+    
+    const data = req.body?.data;
     if (!data || !data.statementItem) return;
 
     const item = data.statementItem;
     const amount = Math.abs(item.amount) / 100;
+    const commission = item.commissionRate ? Math.abs(item.commissionRate) / 100 : 0;
     const description = item.description || 'Транзакція Monobank';
     const isIncome = item.amount > 0;
     const monoId = item.id;
 
-// Якщо це тестовий webhook з REST Client — зупиняємо виконання
     if (monoId && monoId.startsWith('test_')) {
         console.log('🧪 Тестовий вебхук успішно прийнято!');
         return;
     }
 
     try {
-        // ВИПРАВЛЕНО: Перевірка на дублікати (якщо такий monoId вже є, ігноруємо)
         const existingTx = await prisma.transaction.findFirst({ where: { monoId: monoId } });
         if (existingTx) return;
 
-        const model = genAI.getGenerativeModel({ model: "gemini-3.5-flash" });
-        const prompt = `Проаналізуй фінансову транзакцію. 
+        // ДЕТЕКТОР ЗНЯТТЯ ГОТІВКИ (Спліт без AI)
+        const isCashWithdrawal = description.toLowerCase().includes('зняття готівки') || 
+                                 description.toLowerCase().includes('банкомат') || 
+                                 item.mcc === 6011;
+
+        if (isCashWithdrawal) {
+            const cleanAmount = amount - commission; 
+
+            const savedTx = await prisma.transaction.create({
+                data: {
+                    monoId: monoId,
+                    type: 'transfer',
+                    amount: cleanAmount,
+                    source: 'card',
+                    toSource: 'cash',
+                    category: 'Зняття готівки',
+                    description: description,
+                    workspace: 'Особисте'
+                }
+            });
+
+            if (commission > 0) {
+                await prisma.transaction.create({
+                    data: {
+                        monoId: `${monoId}_commission`,
+                        type: 'expense',
+                        amount: commission,
+                        source: 'card',
+                        category: 'Комісії банку',
+                        description: `Комісія: ${description}`,
+                        workspace: 'Особисте'
+                    }
+                });
+            }
+
+            const cleanDescription = escapeHtml(description);
+            const msg = `🏦 <b>Monobank</b> | Автоматично\n\n` +
+                        `🏧 <b>Операція:</b> Зняття готівки (Спліт)\n` +
+                        `💵 <b>У готівку:</b> <code>${cleanAmount.toFixed(2)}</code> грн (💳 ➔ 💵)\n` +
+                        `${commission > 0 ? `💸 <b>Комісія банку:</b> <code>${commission.toFixed(2)}</code> грн\n` : ''}` +
+                        `📝 <b>Опис:</b> <i>${cleanDescription}</i>`;
+
+            return await bot.telegram.sendMessage(process.env.MY_CHAT_ID, msg, {
+                parse_mode: 'HTML',
+                ...Markup.inlineKeyboard([[Markup.button.callback('✏️ Уточнити', `edit_${savedTx.id}`)]])
+            });
+        }
+
+        // ЗВИЧАЙНІ ТРАНЗАКЦІЇ (Захищений виклик AI)
+        let aiData = { type: isIncome ? 'income' : 'expense', category: 'Загальне', workspace: 'Особисте' };
+
+        try {
+            const prompt = `Проаналізуй фінансову транзакцію. 
 Опис: "${description}". Сума: ${amount}. Зарахування: ${isIncome}.
 
 ТИ ПОВИНЕН ОБРАТИ TYPE ТІЛЬКИ З ЦЬОГО СПИСКУ ЗА СУВОРИМИ ПРАВИЛАМИ:
@@ -774,28 +836,30 @@ app.post('/monobank', async (req, res) => {
 
 Визнач type, category (коротко, 1-2 слова) та workspace. Формат JSON: {"type": "...", "category": "...", "workspace": "..."}`;
 
-        const result = await model.generateContent(prompt);
-        const textResponse = result.response.text().trim().replace(/```json/g, '').replace(/```/g, '').trim();
-        const aiData = JSON.parse(textResponse);
+            const textResponse = await generateTextWithFallback(prompt);
+            const cleanJson = textResponse.replace(/```json/g, '').replace(/```/g, '').trim();
+            aiData = JSON.parse(cleanJson);
+        } catch (aiErr) {
+            console.warn('⚠️ ШІ недоступний при обробці Монобанку, ставлю "Загальне":', aiErr.message);
+        }
 
         const savedTx = await prisma.transaction.create({
             data: {
-                monoId: monoId, // Зберігаємо ID від Монобанку
-                type: aiData.type,
+                monoId: monoId, 
+                type: aiData.type || (isIncome ? 'income' : 'expense'),
                 amount: amount,
-                category: aiData.category,
+                source: 'card',
+                category: aiData.category || 'Загальне',
                 description: description,
-                workspace: aiData.workspace
+                workspace: aiData.workspace || 'Особисте'
             }
         });
 
-        // 🛡 Екрануємо зовнішній текст від спецсимволів
         const cleanDescription = escapeHtml(description);
-        const cleanCategory = escapeHtml(aiData.category);
+        const cleanCategory = escapeHtml(aiData.category || 'Загальне');
 
-
-       const msg = `🏦 <b>Monobank</b> | Автоматично\n\n` +
-                    `📦 <b>Простір:</b> ${aiData.workspace}\n` +
+        const msg = `🏦 <b>Monobank</b> | Автоматично\n\n` +
+                    `📦 <b>Простір:</b> ${aiData.workspace || 'Особисте'}\n` +
                     `🏷 <b>Категорія:</b> ${cleanCategory}\n\n` +
                     `💵 <b>Сума:</b> <code>${amount.toFixed(2)}</code> грн\n` +
                     `📝 <b>Опис:</b> <i>${cleanDescription}</i>`;
@@ -804,8 +868,9 @@ app.post('/monobank', async (req, res) => {
             parse_mode: 'HTML',
             ...Markup.inlineKeyboard([[Markup.button.callback('✏️ Уточнити', `edit_${savedTx.id}`)]])
         });
+
     } catch (e) {
-        console.error('Помилка обробки Монобанку:', e);
+        console.error('💥 Критична помилка обробки Монобанку:', e);
     }
 });
 
@@ -1085,7 +1150,8 @@ async function classifyUserIntent(userText) {
 
     try {
         const textResponse = await generateTextWithFallback(prompt);
-        const cleanJson = textResponse.trim().replace(/```json/g, '').replace(/```/g, '').trim();  
+        const cleanJson = textResponse.trim().replace(/```json/g, '').replace(/```/g, '').trim(); 
+        return JSON.parse(cleanJson); 
     } catch (e) {
         console.error('Помилка класифікації наміру користувача:', e);
         return { isTransaction: false, intent: "CHAT" }; // Фолбек на звичайний чат
