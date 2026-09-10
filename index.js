@@ -4,7 +4,7 @@ const cron = require('node-cron');
 const { Telegraf, Markup } = require('telegraf');
 const { PrismaClient } = require('@prisma/client');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
-const { generateTextWithFallback } = require('./fallback-ai');
+const { generateTextWithFallback, generateTextWithRetry } = require('./fallback-ai');
 
 const app = express();
 app.use(express.json());
@@ -618,7 +618,8 @@ bot.on('text', async (ctx) => {
 
 Визнач type, category (коротко, 1-2 слова) та workspace. Формат JSON: {"type": "...", "category": "...", "workspace": "..."}`;
 
-            const textResponse = await generateTextWithFallback(prompt);
+            const { text: textResponse, provider } = await generateTextWithFallback(prompt);
+            console.log(`🤖 Уточнення оброблено через: ${provider}`);
             const cleanJson = textResponse.replace(/```json/g, '').replace(/```/g, '').trim();
             const aiData = JSON.parse(cleanJson);
             
@@ -855,7 +856,8 @@ app.post('/monobank', async (req, res) => {
 
 Визнач type, category (коротко, 1-2 слова) та workspace. Формат JSON: {"type": "...", "category": "...", "workspace": "..."}`;
 
-            const textResponse = await generateTextWithFallback(prompt);
+            const { text: textResponse, provider } = await generateTextWithFallback(prompt);
+            console.log(`🤖 Monobank webhook оброблено через: ${provider}`);
             const cleanJson = textResponse.replace(/```json/g, '').replace(/```/g, '').trim();
             aiData = JSON.parse(cleanJson);
         } catch (aiErr) {
@@ -941,65 +943,30 @@ async function getDailyReportData() {
         totalCapital: globalStats.totalCapital
     };
 }
-
-// --- Генерація 5-компонентного AI-аналізу (Gemini) ---
-async function generateDailyAiAnalysis(dailyData) {
-    try {
-        //1. Отримуємо транзакції за останні 7 днів для порівняння з середнім чеком
-        const sevenDaysAgo = new Date();
-        sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
-
-        const pastWeekTx = await prisma.transaction.findMany({
-            where: {
-                createdAt: { gte: sevenDaysAgo},
-                type: 'expense'
-            }
-        });
-
-        const totalWeekExpense = pastWeekTx.reduce((sum, t) => sum + t.amount, 0);
-        const avgDailyExpense = totalWeekExpense / 7;
-
-        //2. Формуємо промпт
-        const prompt = `
-        Ти — особистий фінансовий аналітик та тренер. 
-        Проаналізуй фінансовий день користувача та надай коротку, влучну, структуровану аналітику (до 4-5 речень).
-
-        ДАНІ ЗА СЬОГОДНІ:
-        - Доходи за день: ${dailyData.dayIncome} грн
-        - Витрати за день: ${dailyData.dayExpense} грн
-        - Категорії витрат за сьогодні: ${JSON.stringify(dailyData.categoryExpenses)}
-        - Реальний залишок на картці: ${dailyData.realBalance} грн
-        - Загальний капітал: ${dailyData.totalCapital} грн
-
-        КОНТЕКСТ ДЛЯ ПОРІВНЯННЯ:
-        - Середні денні витрати за останні 7 днів: ${avgDailyExpense.toFixed(2)} грн
-
-        СФОРМУЙ ВІДПОВІДЬ ЗА ТАКИМИ 4 ПУНКТАМИ (використовуй емодзі, будь дружнім, але практичним):
-        1. **Порівняння:** Порівняй сьогоднішні витрати із середніми за тиждень (${avgDailyExpense.toFixed(2)} грн).
-        2. **Структура:** Оціни, на що пішли гроші (чи були це імпульсивні витрати, чи необхідні). Якщо витрат 0 — похвали за "сухий день".
-        3. **Заощадження/Капітал:** Коротка порада щодо збережень або балансу.
-        4. **Питання на вечір:** Постав ОДНЕ влучне запитання про сьогоднішні рішення/покупки, яке змусить замислитися.
-
-        Пиши українською мовою, без складних термінів, стисло та по суті.
-        `;
-
-        //Виклики Gemini з авто-переключенням на Groq при помилці 503
-        const resultText = await generateTextWithFallback(prompt);
-        return resultText;
-    } catch (error) {
-        console.error('Помилка генерації AI аналізу (обидва AI впали):', error);
-        return "⚠️ Не вдалося згенерувати AI-аналіз через збій мережі AI.";
-    }
-
-}
     
-// --- АВТОМАТИЧНИЙ ЩОДЕННИЙ ЗВІТ (Cron Job) ---
+// --- ДОПОМІЖНА ФУНКЦІЯ ГЕНЕРАЦІЇ АНАЛІЗУ (З ПОВЕРНЕННЯМ ПРОВАЙДЕРА) ---
+async function generateDailyAiAnalysis(data) {
+    const prompt = `Проаналізуй фінансовий день та дай короткий підсумок, зауваження або пораду.
+Доходи: ${data.dayIncome} грн. 
+Витрати: ${data.dayExpense} грн.
+Розподіл по категоріях: ${JSON.stringify(data.categoryExpenses)}.
+Залишок на картці: ${data.realBalance} грн.
+Загальний капітал: ${data.totalCapital} грн.
+
+Будь лаконічним, дай 2-3 речення. Без зайвого форматування.`;
+
+    // Використовуємо функцію з чергою та повторними спробами (5 спроб по 12 сек)
+    // Вона ВИНЕННА викидати помилку, якщо всі AI лежать!
+    const result = await generateTextWithRetry(prompt, 5, 12000);
+    return result; // Повертає { text, provider }
+}
+
+// --- 1. АВТОМАТИЧНИЙ ЩОДЕННИЙ ЗВІТ (23:54) ---
 cron.schedule('54 23 * * *', async () => {
     console.log('⏰ Запуск вечірнього звіту...');
     try {
         const data = await getDailyReportData();
 
-        //Форматуємо поточну дату (наприклад: "21 серпня 2026")
         const todayFormatted = new Date().toLocaleDateString('uk-UA', {
             day: 'numeric',
             month: 'long',
@@ -1007,18 +974,24 @@ cron.schedule('54 23 * * *', async () => {
         });
 
         let categoriesText = '';
-        for (const [cat, sum] of Object.entries(data.categoryExpenses)) {
-            categoriesText += `  • ${escapeHtml(cat)}: <code>${sum.toFixed(2)}</code> грн\n`;
+        if (data.categoryExpenses && Object.keys(data.categoryExpenses).length > 0) {
+            for (const [cat, sum] of Object.entries(data.categoryExpenses)) {
+                categoriesText += `  • ${escapeHtml(cat)}: <code>${sum.toFixed(2)}</code> грн\n`;
+            }
         }
 
-        let aiAnalysis = '';
+        let aiText = '';
+        let aiProvider = '';
+
         try {
-            // 1. Cпроба згенерувати AI-аналіз(Gemini => Hot Fallback Groq))
-            aiAnalysis = await generateDailyAiAnalysis(data);
+            // 1. Намагаємося згенерувати аналіз через AI з повторними спробами
+            const aiRes = await generateDailyAiAnalysis(data);
+            aiText = aiRes.text;
+            aiProvider = aiRes.provider;
         } catch (aiError) {
-            console.error('🚨 Обидва AI-сервіси (Gemini та Groq) недоступні! Активація холодного резерву...', aiError.message);
+            console.error('🚨 Обидва AI-сервіси (Gemini та Groq) недоступні після всіх спроб! Запис у PENDING...', aiError.message);
             
-            // 2. Фолбек: якщо обидва AI недоступні, збереження завдання в базу данних
+            // 2. ФОЛБЕК: Додаємо у БД зі статусом PENDING
             await prisma.reportQueue.create({
                 data: {
                     prompt: JSON.stringify(data),
@@ -1026,7 +999,7 @@ cron.schedule('54 23 * * *', async () => {
                 }
             });
 
-            aiAnalysis = '⚠️ AI-аналітик тимчасово недоступний. Завдання збережено в чергу БД і буде опрацьовано автоматично пізніше.';
+            aiText = '⚠️ AI-аналітик тимчасово недоступний через високе навантаження мережі. Завдання збережено в чергу БД і буде додано автоматично пізніше.';
         }
 
         const reportMessage = 
@@ -1040,21 +1013,21 @@ ${categoriesText ? `📂 <b>Категорії витрат:</b>\n${categoriesTe
 💰 <b>Загальний капітал:</b> <code>${data.totalCapital.toFixed(2)}</code> грн
 ━━━━━━━━━━━━━━━━━━
 🤖 <b>AI-Аналітик:</b>
-${aiAnalysis}`;
+${cleanAiResponse(aiText)}
+${aiProvider ? `\n🤖 <i>Згенеровано за допомогою: ${aiProvider}</i>` : ''}`;
 
         await bot.telegram.sendMessage(process.env.MY_CHAT_ID, reportMessage, { parse_mode: 'HTML' });
-
-        // Зберігаємо вечірній аналіз в історію чату, щоб Gemini пам'ятала своє запитання
         await saveChatMessage(process.env.MY_CHAT_ID, 'model', reportMessage);
+
     } catch (error) {
-        console.error('Помилка відправки авто-звіту:', error);
+        console.error('💥 Помилка відправки авто-звіту:', error);
     }
 }, {
     timezone: "Europe/Kyiv"
 });
 
-// --- POLLING-КРОН ("Нічний старт") ---
-// Запускається кожні 30 хвилин для розбору накопичених задач з БД
+// --- 2. POLLING-КРОН ("Нічний санітар") ---
+// Запускається кожні 30 хвилин для розбору накопичених PENDING задач
 cron.schedule('*/30 * * * *', async () => {
     try {
         const pendingReports = await prisma.reportQueue.findMany({
@@ -1063,30 +1036,35 @@ cron.schedule('*/30 * * * *', async () => {
 
         if (pendingReports.length === 0) return;
 
-        console.log(` sweeping Нічний санітар: знайдено ${pendingReports.length} необроблених звітів.`);
+        console.log(`🧹 Нічний санітар: знайдено ${pendingReports.length} необроблених звітів.`);
 
         for (const report of pendingReports) {
             try {
                 const dailyData = JSON.parse(report.prompt);
-                const aiAnalysis = await generateDailyAiAnalysis(dailyData);
+                
+                // Пробуємо обробити
+                const aiRes = await generateDailyAiAnalysis(dailyData);
 
                 const reportMessage = 
-`🔄 <b>ДОДОПРАЦЬОВАНИЙ AI-АНАЛІЗ ЗВІТУ</b>
+`🔄 <b>ДОДОПРАЦЬОВАНИЙ AI-АНАЛІЗ ЗВІТУ (з черги БД)</b>
 ━━━━━━━━━━━━━━━━━━
-🤖 <b>AI-Аналітик (із черги БД):</b>
-${cleanAiResponse(aiAnalysis)}`;
+🤖 <b>AI-Аналітик:</b>
+${cleanAiResponse(aiRes.text)}
+
+🤖 <i>Згенеровано за допомогою: ${aiRes.provider}</i>`;
 
                 await bot.telegram.sendMessage(process.env.MY_CHAT_ID, reportMessage, { parse_mode: 'HTML' });
                 await saveChatMessage(process.env.MY_CHAT_ID, 'model', reportMessage);
 
+                // Тільки при УСПІХУ змінюємо статус на DONE
                 await prisma.reportQueue.update({
                     where: { id: report.id },
                     data: { status: 'DONE' }
                 });
 
-                console.log(`✅ Завдання #${report.id} успішно оброблено.`);
+                console.log(`✅ Завдання #${report.id} успішно оброблено санітаром.`);
             } catch (itemError) {
-                console.error(`⚠️ Не вдалося обробити завдання #${report.id}:`, itemError.message);
+                console.warn(`⏳ Завдання #${report.id} не вдалося обробити цього разу: ${itemError.message}`);
             }
         }
     } catch (error) {
@@ -1168,7 +1146,8 @@ async function classifyUserIntent(userText) {
 `;
 
     try {
-        const textResponse = await generateTextWithFallback(prompt);
+        const { text: textResponse, provider } = await generateTextWithFallback(prompt);
+        console.log(`🤖 Intent оброблено через: ${provider}`);
         const cleanJson = textResponse.trim().replace(/```json/g, '').replace(/```/g, '').trim(); 
         return JSON.parse(cleanJson); 
     } catch (e) {
