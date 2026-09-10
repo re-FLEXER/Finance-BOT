@@ -962,7 +962,7 @@ async function generateDailyAiAnalysis(data) {
 }
 
 // --- 1. АВТОМАТИЧНИЙ ЩОДЕННИЙ ЗВІТ (23:54) ---
-cron.schedule('54 23 * * *', async () => {
+cron.schedule('58 15 * * *', async () => {
     console.log('⏰ Запуск вечірнього звіту...');
     try {
         const data = await getDailyReportData();
