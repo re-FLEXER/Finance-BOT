@@ -944,25 +944,53 @@ async function getDailyReportData() {
     };
 }
     
-// --- ДОПОМІЖНА ФУНКЦІЯ ГЕНЕРАЦІЇ АНАЛІЗУ (З ПОВЕРНЕННЯМ ПРОВАЙДЕРА) ---
-async function generateDailyAiAnalysis(data) {
-    const prompt = `Проаналізуй фінансовий день та дай короткий підсумок, зауваження або пораду.
-Доходи: ${data.dayIncome} грн. 
-Витрати: ${data.dayExpense} грн.
-Розподіл по категоріях: ${JSON.stringify(data.categoryExpenses)}.
-Залишок на картці: ${data.realBalance} грн.
-Загальний капітал: ${data.totalCapital} грн.
+// --- ДОПОМІЖНА ФУНКЦІЯ ГЕНЕРАЦІЇ АНАЛІЗУ (З ПОВЕРНЕННЯМ ПРОВАЙДЕРА ТА СТАРИМ ПРОМПТОМ) ---
+async function generateDailyAiAnalysis(dailyData) {
+    // 1. Отримуємо транзакції за останні 7 днів для порівняння з середнім чеком
+    const sevenDaysAgo = new Date();
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
 
-Будь лаконічним, дай 2-3 речення. Без зайвого форматування.`;
+    const pastWeekTx = await prisma.transaction.findMany({
+        where: {
+            createdAt: { gte: sevenDaysAgo },
+            type: 'expense'
+        }
+    });
 
-    // Використовуємо функцію з чергою та повторними спробами (5 спроб по 12 сек)
-    // Вона ВИНЕННА викидати помилку, якщо всі AI лежать!
+    const totalWeekExpense = pastWeekTx.reduce((sum, t) => sum + t.amount, 0);
+    const avgDailyExpense = totalWeekExpense / 7;
+
+    // 2. Деталізований 4-пунктовий промпт
+    const prompt = `
+Ти — особистий фінансовий аналітик та тренер. 
+Проаналізуй фінансовий день користувача та надай коротку, влучну, структуровану аналітику.
+
+ДАНІ ЗА СЬОГОДНІ:
+- Доходи за день: ${dailyData.dayIncome} грн
+- Витрати за день: ${dailyData.dayExpense} грн
+- Категорії витрат за сьогодні: ${JSON.stringify(dailyData.categoryExpenses)}
+- Реальний залишок на картці: ${dailyData.realBalance} грн
+- Загальний капітал: ${dailyData.totalCapital} грн
+
+КОНТЕКСТ ДЛЯ ПОРІВНЯННЯ:
+- Середні денні витрати за останні 7 днів: ${avgDailyExpense.toFixed(2)} грн
+
+СФОРМУЙ ВІДПОВІДЬ СУВОРО ЗА ТАКИМИ 4 ПУНКТАМИ (використовуй емодзі, звертайся на "ви" або "ти" в дружньому тоні):
+1. 📉 **Порівняння:** Порівняй сьогоднішні витрати із середніми за тиждень (${avgDailyExpense.toFixed(2)} грн).
+2. 🍿 **Структура:** Оціни, на що пішли гроші (чи були це імпульсивні витрати, чи необхідні). Якщо витрат 0 — похвали за "сухий день".
+3. 💰 **Капітал:** Коротка порада щодо збережень або балансу на основі поточного капіталу (${dailyData.totalCapital} грн).
+4. 🧐 **Питання на вечір:** Постав ОДНЕ влучне запитання про сьогоднішні рішення/покупки, яке змусить замислитися.
+
+Пиши українською мовою, без складних термінів, стисло та по суті.
+`;
+
+    // 3. Використовуємо функцію з чергою та повторними спробами (5 спроб по 12 сек)
     const result = await generateTextWithRetry(prompt, 5, 12000);
     return result; // Повертає { text, provider }
 }
 
 // --- 1. АВТОМАТИЧНИЙ ЩОДЕННИЙ ЗВІТ (23:54) ---
-cron.schedule('58 15 * * *', async () => {
+cron.schedule('54 23 * * *', async () => {
     console.log('⏰ Запуск вечірнього звіту...');
     try {
         const data = await getDailyReportData();
