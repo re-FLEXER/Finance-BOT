@@ -280,38 +280,55 @@ bot.command('setbalance', async (ctx) => {
     await ctx.reply(`✅ Початковий залишок успішно зафіксовано: ${amount} грн.`);
 });
 
+// --- ХЕЛПЕР СМАРТ-СИНХРОНІЗАЦІЇ (РЕКОНСИЛЯЦІЯ БАЛАНСУ) ---
+async function processBalanceSync(realAmount) {
+    const stats = await getStatsData();
+    const diff = realAmount - stats.cardBalance;
+
+    // Якщо різниця 0 — баланси вже ідеально збігаються
+    if (Math.abs(diff) < 0.01) {
+        return {
+            synced: false,
+            message: `👌 <b>Баланс уже ідеальний!</b>\nНа картці в боті та по факту рівно <code>${realAmount.toFixed(2)}</code> грн.`
+        };
+    }
+
+    const isExpenseCorrection = diff < 0;
+    const absDiff = Math.abs(diff);
+
+    // Створюємо компенсуючу транзакцію замість зміни init_balance
+    await prisma.transaction.create({
+        data: {
+            type: isExpenseCorrection ? 'expense' : 'income',
+            amount: absDiff,
+            source: 'card',
+            category: '🛠 Коригування',
+            description: isExpenseCorrection 
+                ? `Смарт-синхронізація (невраховані витрати: -${absDiff.toFixed(2)} грн)`
+                : `Смарт-синхронізація (неврахований дохід: +${absDiff.toFixed(2)} грн)`,
+            workspace: 'Особисте'
+        }
+    });
+
+    const statusIcon = isExpenseCorrection ? '🔴' : '🟢';
+    const msg = `🔄 <b>СМАРТ-СИНХРОНІЗАЦІЯ ВИКОНАНА</b>\n━━━━━━━━━━━━━━━━━━━\n` +
+                `💳 <b>Було в боті:</b> <code>${stats.cardBalance.toFixed(2)}</code> грн\n` +
+                `🎯 <b>Встановлено факт:</b> <code>${realAmount.toFixed(2)}</code> грн\n` +
+                `${statusIcon} <b>Коригування:</b> <code>${isExpenseCorrection ? '-' : '+'}${absDiff.toFixed(2)}</code> грн (категорія: 🛠 Коригування)\n\n` +
+                `<i>Початковий залишок збережено без змін. Математика історії повністю чиста.</i>`;
+
+    return { synced: true, message: msg };
+}
+
+
+// --- КОМАНДА /sync ---
 bot.command('sync', async (ctx) => {
     const args = ctx.message.text.split(' ');
     const realAmount = parseFloat(args[1]);
     if (isNaN(realAmount)) return ctx.reply('⚠️ Формат: /sync <сума на картці>. Наприклад: /sync 358.36');
 
-    // 1. Отримуємо актуальні розраховані баланси
-    const stats = await getStatsData();
-    
-    // 2. Вираховуємо різницю між тим, що є зараз на картці в боті, та реальністю
-    const diff = realAmount - stats.cardBalance;
-
-    // 3. Знаходимо існуючий початковий залишок
-    const initTx = await prisma.transaction.findFirst({ where: { type: 'init_balance' } });
-
-    if (initTx) {
-        await prisma.transaction.update({ 
-            where: { id: initTx.id }, 
-            data: { amount: initTx.amount + diff } 
-        });
-    } else {
-        await prisma.transaction.create({ 
-            data: { 
-                type: 'init_balance', 
-                amount: diff, 
-                category: 'Початковий залишок', 
-                description: 'Синхронізація балансу', 
-                workspace: 'Особисте' 
-            } 
-        });
-    }
-
-    await ctx.reply(`✅ Синхронізовано! Баланс картки вирівняно під ${realAmount.toFixed(2)} грн.\nУсі доходи та витрати повністю збережені.`);
+    const result = await processBalanceSync(realAmount);
+    await ctx.replyWithHTML(result.message);
 });
 
 bot.command('setsavings', async (ctx) => {
@@ -414,7 +431,7 @@ bot.command('stats', showStats);
 // --- РУЧНЕ ДОДАВАННЯ ТРАНЗАКЦІЇ /add ---
 bot.command('add', async (ctx) => {
     const userId = ctx.from.id;
-    delete userStates[userId]; // Скасовуємо редагування про всяк випадок
+    delete userStates[userId];
 
     const text = ctx.message.text.replace('/add', '').trim();
     if (!text) {
@@ -431,24 +448,16 @@ bot.command('add', async (ctx) => {
     const statusMsg = await ctx.reply('⏳ Записую витрату...');
 
     try {
-        const model = genAI.getGenerativeModel({ model: "gemini-3.5-flash" });
         const prompt = `Проаналізуй фінансову витрату користувача: "${description}", сума: ${amount}.
 
 Визнач type ("expense", "income", "saving"), category (коротко 1-2 слова) та workspace ("Особисте" або "Проєкт").
 Формат JSON: {"type": "expense", "category": "...", "workspace": "..."}`;
 
-        //Rerty механізм для Google API
-        let result;
-        try {
-            result = await model.generateContent(prompt);
-        } catch (err) {
-    console.warn('⚠️ Первинний запит Gemini не вдався, робимо повтор...', err.message);
-    await new Promise(res => setTimeout(res, 1000));
-    result = await model.generateContent(prompt);
-}
+        const { text: textResponse, provider } = await generateTextWithFallback(prompt);
+        console.log(`🤖 /add оброблено через: ${provider}`);
 
-        const textResponse = result.response.text().trim().replace(/```json/g, '').replace(/```/g, '').trim();
-        const aiData = JSON.parse(textResponse);
+        const cleanJson = textResponse.trim().replace(/```json/g, '').replace(/```/g, '').trim();
+        const aiData = JSON.parse(cleanJson);
 
         await prisma.transaction.create({
             data: {
@@ -464,14 +473,13 @@ bot.command('add', async (ctx) => {
             ctx.chat.id,
             statusMsg.message_id,
             null,
-            `✅ <b>Витрату успішно додано!</b>\n\n💵 <b>Сума:</b> <code>${amount.toFixed(2)}</code> грн\n🏷 <b>Категорія:</b> ${aiData.category}\n📦 <b>Простір:</b> ${aiData.workspace}\n📝 <b>Опис:</b> <i>${escapeHtml(description)}</i>`,
+            `✅ <b>Витрату успішно додано!</b>\n\n💵 <b>Сума:</b> <code>${amount.toFixed(2)}</code> грн\n🏷 <b>Категорія:</b> ${escapeHtml(aiData.category)}\n📦 <b>Простір:</b> ${aiData.workspace}\n📝 <b>Опис:</b> <i>${escapeHtml(description)}</i>\n\n🤖 <i>Оброблено через: ${provider}</i>`,
             { parse_mode: 'HTML' }
         );
     } catch (e) {
         console.error('Помилка /add', e);
-        // Фоллбек: якщо Gemini повністю впав, зберігаємо просто як "Загальне"
         await prisma.transaction.create({
-            data: {type: 'expense', amount: amount, category: 'Загальне', description: description, workspace: 'Особисте' }
+            data: { type: 'expense', amount: amount, category: 'Загальне', description: description, workspace: 'Особисте' }
         });
         return await ctx.telegram.editMessageText(
             ctx.chat.id,
@@ -481,7 +489,6 @@ bot.command('add', async (ctx) => {
             { parse_mode: 'HTML' }
         );
     }
-
 });
 
 // --- ФУНКЦІЇ ПАМ'ЯТІ ЧАТУ ---
@@ -656,6 +663,12 @@ bot.on('text', async (ctx) => {
     // 3. AI-РОУТЕР: Автоматична перевірка на транзакцію у звичайному тексті
     const intentData = await classifyUserIntent(userText);
 
+    // 3.1. Обробка безшовного наміру SYNC ("по факту на карті 6500")
+    if (intentData && intentData.intent === 'SYNC' && typeof intentData.amount === 'number') {
+        const syncResult = await processBalanceSync(intentData.amount);
+        return await ctx.replyWithHTML(syncResult.message);
+    }
+
     if (intentData && intentData.isTransaction && typeof intentData.amount === 'number') {
         const savedTx = await prisma.transaction.create({
             data: {
@@ -711,8 +724,7 @@ bot.on('text', async (ctx) => {
 Правила відповідей:
 1. Відповідай коротко, лаконічно, дружньо та по суті.
 2. Враховуй попередній контекст діалогу.
-3. Використовуй тільки базовий HTML (<b>, <i>). НЕ використовуй Markdown зі зірочками!
-4. Якщо користувач хоче зробити витрату, але має борги чи малий баланс — підсвіти це як ризик.
+3. Якщо користувач хоче зробити витрату, але має борги чи малий баланс — підсвіти це як ризик.
 `;
 
         const advisorModel = genAI.getGenerativeModel({ 
@@ -1147,19 +1159,25 @@ async function classifyUserIntent(userText) {
     const prompt = `Ти — розумний класифікатор намірів для фінансового бота.
 Проаналізуй текст користувача: "${userText}".
 
-Твоє завдання — визначити, чи це транзакція, чи це звичайна розмова/запитання/фінансове порада.
+Твоє завдання — визначити intent (TRANSACTION, SYNC, CHAT).
 
 ВАРІАНТИ INTENT:
-1. "TRANSACTION" — якщо в тексті є чітка фінансова дія, сума або перекази між рахунками/готівкою (наприклад, "зняв 500 готівки", "купив каву 60", "поповнив кеш 1000", "зняв з картки 200").
-2. "CHAT" — якщо це запитання, розмова, фінансове аналізування, привітання ("порадь куди вкласти", "привіт", "скільки я витратив?").
+1. "SYNC" — якщо користувач вказує поточний реальний факт на балансі/картці (наприклад: "по факту на карті 4500", "баланс 3200 грн", "фактично на картці 5000", "на карті 6500", "реальний баланс 1200").
+2. "TRANSACTION" — якщо в тексті є чітка фінансова дія, сума чи витрата/дохід/переказ (наприклад: "зняв 500 готівки", "купив каву 60", "поповнив кеш 1000").
+3. "CHAT" — якщо це запитання, розмова, аналіз, привітання ("порадь куди вкласти", "привіт", "скільки витратив?").
 
-ЯКЩО INTENT = "TRANSACTION", визнач такі поля:
+ЯКЩО INTENT = "SYNC":
+- isTransaction: false
+- intent: "SYNC"
+- amount: число (фактична сума, вказана користувачем)
+
+ЯКЩО INTENT = "TRANSACTION":
 - isTransaction: true
 - intent: "TRANSACTION"
-- amount: число (сума транзакції)
+- amount: число
 - type: "expense" | "income" | "transfer" | "saving"
-- source: "card" | "cash" (звідки гроші). Якщо вказано тригери "кеш", "готівка", "готівкою", "паперові", "з рук" — ставимо "cash", інакше за замовчуванням "card".
-- toSource: "card" | "cash" | null (використовується ТІЛЬКИ якщо type = "transfer", наприклад при знятті готівки з картки: source="card", toSource="cash").
+- source: "card" | "cash"
+- toSource: "card" | "cash" | null
 - category: коротка категорія (1-2 слова)
 - workspace: "Особисте" або "Проєкт"
 - description: короткий опис
@@ -1169,8 +1187,8 @@ async function classifyUserIntent(userText) {
 - intent: "CHAT"
 
 ВІДПОВІДАЙ ВИКЛЮЧНО В ФОРМАТІ JSON без додаткових символів чи markdown.
-Приклад JSON для транзакції:
-{"isTransaction": true, "intent": "TRANSACTION", "amount": 500, "type": "transfer", "source": "card", "toSource": "cash", "category": "Зняття готівки", "workspace": "Особисте", "description": "Зняв 500 готівки"}
+Приклад JSON для SYNC: {"isTransaction": false, "intent": "SYNC", "amount": 6500}
+Приклад JSON для TRANSACTION: {"isTransaction": true, "intent": "TRANSACTION", "amount": 500, "type": "transfer", "source": "card", "toSource": "cash", "category": "Зняття готівки", "workspace": "Особисте", "description": "Зняв 500 готівки"}
 `;
 
     try {
@@ -1180,6 +1198,6 @@ async function classifyUserIntent(userText) {
         return JSON.parse(cleanJson); 
     } catch (e) {
         console.error('Помилка класифікації наміру користувача:', e);
-        return { isTransaction: false, intent: "CHAT" }; // Фолбек на звичайний чат
+        return { isTransaction: false, intent: "CHAT" };
     }
 }
