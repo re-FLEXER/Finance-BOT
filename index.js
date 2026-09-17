@@ -434,34 +434,45 @@ bot.command('stats', showStats);
 // --- КОМАНДА /undo (Soft Delete) ---
 bot.command('undo', async (ctx) => {
     try {
-        // Знаходимо останню АКТИВНУ транзакцію
+        // 1. Знаходимо останню АКТИВНУ транзакцію
         const lastTx = await prisma.transaction.findFirst({
             where: { is_deleted: false },
             orderBy: { createdAt: 'desc' }
         });
+
         if (!lastTx) {
             return ctx.reply('❌ Немає активних транзакцій для скасування.');
         }
+
+        // 2. Оновлюємо статус на is_deleted: true
         await prisma.transaction.update({
-            where: { id: lastTx.id },
+            where: { id: Number(lastTx.id) }, // Захист: явно приводимо id до Number
             data: { is_deleted: true }
         });
-        
+
+        // 3. Безпечно готуємо змінні (з логічним фолбеком без виклику розривних функцій)
         const typeLabel = lastTx.type === 'income' ? '🟢 Дохід' 
-                          : lastTx.type === 'expense' ? '🔴 Витрату' 
-                          : lastTx.type === 'saving' ? '🔁 Переказ' 
-                          : '🟡 Операцію';
+                        : lastTx.type === 'expense' ? '🔴 Витрату' 
+                        : lastTx.type === 'transfer' ? '🔁 Переказ' 
+                        : '🟡 Операцію';
+
+        const rawCat = lastTx.category || 'Загальне';
+        const rawDesc = lastTx.description || 'без опису';
+
+        // Використовуємо локальне екранування, щоб не залежати від зовнішніх функцій
+        const safeCat = String(rawCat).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        const safeDesc = String(rawDesc).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
         await ctx.replyWithHTML(
             `🔄 <b>ОПЕРАЦІЮ УСПІШНО СКАСОВАНО!</b>\n━━━━━━━━━━━━━━━━━━━\n` +
             `❌ <b>Позначено як видалену:</b> ${typeLabel}\n` +
             `💵 <b>Сума:</b> <code>${lastTx.amount.toFixed(2)}</code> грн\n` +
-            `🏷 <b>Категорія:</b> ${escapeHtml(lastTx.category || 'Загальне')}\n` +
-            `📝 <b>Опис:</b> <i>${escapeHtml(lastTx.description || 'без опису')}</i>\n\n` +
+            `🏷 <b>Категорія:</b> ${safeCat}\n` +
+            `📝 <b>Опис:</b> <i>${safeDesc}</i>\n\n` +
             `<i>Статистика та баланс автоматично вирівняні!</i>`
         );
     } catch (e) {
-        console.error('Помилка при виконанні /undo:', e);
+        console.error('💥 КРИТИЧНА ПОМИЛКА В /undo:', e);
         await ctx.reply('❌ Сталася помилка при спробі скасувати останню транзакцію.');
     }
 });
