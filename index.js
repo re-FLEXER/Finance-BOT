@@ -120,7 +120,9 @@ app.post(WEBHOOK_PATH, (req, res) => {
 
 // --- СТАТИСТИКА ТА РОЗРАХУНКИ ---
 const getStatsData = async () => {
-    const allTransactions = await prisma.transaction.findMany();
+    const allTransactions = await prisma.transaction.findMany({ 
+        where: { is_deleted: false }
+    });
     
     let initBalance = 0;
     let initSaving = 0;
@@ -259,6 +261,7 @@ const helpMessage = `
 
 🔄 <b>Керування даними:</b>
 • /reset — Повністю очистити базу даних (з підтвердженням).
+• /undo — <b>Скасувати останню дію</b> (Ctrl+Z для випадкових витрат).
 
 💡 <b>ШІ-Радник:</b>
 • Пиши будь-яке повідомлення і ШІ дасть пораду на базі твого бюджету.
@@ -427,6 +430,41 @@ bot.command('getdebt', async (ctx) => {
 });
 
 bot.command('stats', showStats);
+
+// --- КОМАНДА /undo (Soft Delete) ---
+bot.command('undo', async (ctx) => {
+    try {
+        // Знаходимо останню АКТИВНУ транзакцію
+        const lastTx = await prisma.transaction.findFirst({
+            where: { is_deleted: false },
+            orderBy: { createdAt: 'desc' }
+        });
+        if (!lastTx) {
+            return ctx.reply('❌ Немає активних транзакцій для скасування.');
+        }
+        await prisma.transaction.update({
+            where: { id: lastTx.id },
+            data: { is_deleted: true }
+        });
+        
+        const typeLabel = lastTx.type === 'income' ? '🟢 Дохід' 
+                          : lastTx.type === 'expense' ? '🔴 Витрату' 
+                          : lastTx.type === 'saving' ? '🔁 Переказ' 
+                          : '🟡 Операцію';
+
+        await ctx.replyWithHTML(
+            `🔄 <b>ОПЕРАЦІЮ УСПІШНО СКАСОВАНО!</b>\n━━━━━━━━━━━━━━━━━━━\n` +
+            `❌ <b>Позначено як видалену:</b> ${typeLabel}\n` +
+            `💵 <b>Сума:</b> <code>${lastTx.amount.toFixed(2)}</code> грн\n` +
+            `🏷 <b>Категорія:</b> ${escapeHtml(lastTx.category || 'Загальне')}\n` +
+            `📝 <b>Опис:</b> <i>${escapeHtml(lastTx.description || 'без опису')}</i>\n\n` +
+            `<i>Статистика та баланс автоматично вирівняні!</i>`
+        );
+    } catch (e) {
+        console.error('Помилка при виконанні /undo:', e);
+        await ctx.reply('❌ Сталася помилка при спробі скасувати останню транзакцію.');
+    }
+});
 
 // --- РУЧНЕ ДОДАВАННЯ ТРАНЗАКЦІЇ /add ---
 bot.command('add', async (ctx) => {
@@ -1129,6 +1167,7 @@ app.listen(PORT, async () => {
         await bot.telegram.setMyCommands([
             { command: 'stats', description: '📊 Фінансова статистика' },
             { command: 'sync', description: '🔄 Синхронізувати баланс з карткою' },
+            { command: 'undo', description: '🔄 Скасувати останню операцію (Ctrl+Z)' },
             { command: 'setsavings', description: '🟡 Встановити суму збережень' },
             { command: 'setbalance', description: '💵 Встановити початковий залишок' },
             { command: 'debt', description: '🤝 Взяв у борг (Пасив)' },
