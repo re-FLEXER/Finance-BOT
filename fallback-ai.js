@@ -7,34 +7,57 @@ const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function generateTextWithFallback(prompt) {
-    // 1. Спроба через Gemini
+    let rawText = '';
+    let providerName = '';
+
+    // 1. Спроба через Gemini (СИМУЛЯЦІЯ ПОЛОМКИ ДЛЯ ТЕСТУ)
     try {
-      //  const model = genAI.getGenerativeModel({ model: 'gemini-3.5-flash' });
-      //  const result = await model.generateContent(prompt);
-      //  return {
-      //      text: result.response.text(),
-      //      provider: 'Gemini (3.5 Flash)'
-      //  };
-      throw new Error('503 Service Unavailable (Simulated)');
+        // const model = genAI.getGenerativeModel({ model: 'gemini-3.5-flash' });
+        // const result = await model.generateContent(prompt);
+        // rawText = result.response.text();
+        // providerName = 'Gemini (3.5 Flash)';
+        
+        throw new Error('503 Service Unavailable (Simulated for Groq Test)');
     } catch (geminiErr) {
         console.warn('⚠️ Gemini API відмовив (503/Error). Перемикаю на Groq...', geminiErr.message);
+        
+        // 2. Спроба через Groq
+        try {
+            const chatCompletion = await groq.chat.completions.create({
+                messages: [
+                    { 
+                        role: 'system', 
+                        content: 'You are a JSON extractor. Output ONLY valid JSON object/array without any markdown, introductory or explanation text.' 
+                    },
+                    { role: 'user', content: prompt }
+                ],
+                model: 'groq/compound',
+            });
+
+            rawText = chatCompletion.choices[0]?.message?.content || '';
+            providerName = 'Groq (Compound)';
+        } catch (groqErr) {
+            console.error('❌ Groq API також відмовив:', groqErr.message);
+            throw new Error('ALL_AI_PROVIDERS_DOWN');
+        }
     }
 
-    // 2. Спроба через Groq
-    try {
-        const chatCompletion = await groq.chat.completions.create({
-            messages: [{ role: 'user', content: prompt }],
-            model: 'groq/compound',
-        });
-        return {
-            text: chatCompletion.choices[0]?.message?.content || '',
-            provider: 'Groq (Compound)'
-        };
-    } catch (groqErr) {
-        console.error('❌ Groq API також відмовив:', groqErr.message);
+    // 🛡 САНІТАР-ПАРСЕР: Витягаємо чисто {...} та захищаємо JSON.parse від базікання AI
+    let cleanedText = rawText.trim()
+        .replace(/```json/gi, '')
+        .replace(/```/g, '');
+
+    const firstBrace = cleanedText.indexOf('{');
+    const lastBrace = cleanedText.lastIndexOf('}');
+
+    if (firstBrace !== -1 && lastBrace !== -1) {
+        cleanedText = cleanedText.substring(firstBrace, lastBrace + 1);
     }
 
-    throw new Error('ALL_AI_PROVIDERS_DOWN');
+    return {
+        text: cleanedText,
+        provider: providerName
+    };
 }
 
 /**
