@@ -19,8 +19,8 @@ model Transaction {
   monoId      String?
   source      String?  @default("card") // 'card' або 'cash' (звідки)
   toSource    String?  // 'card' або 'cash' (куди, використовується тільки для type: 'transfer'
-
   is_deleted  Boolean  @default(false)
+  batchId     String?  // для групування транзакцій
 }
 
 model ChatHistory {

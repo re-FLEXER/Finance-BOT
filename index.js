@@ -1,6 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const cron = require('node-cron');
+const crypto = require('crypto');
 const { Telegraf, Markup } = require('telegraf');
 const { PrismaClient } = require('@prisma/client');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
@@ -436,7 +437,7 @@ bot.command('getdebt', async (ctx) => {
 
 bot.command('stats', showStats);
 
-// --- КОМАНДА /undo (Soft Delete) ---
+// --- КОМАНДА /undo (Smart Batch Soft Delete) ---
 bot.command('undo', async (ctx) => {
     try {
         // 1. Знаходимо останню АКТИВНУ транзакцію
@@ -449,33 +450,46 @@ bot.command('undo', async (ctx) => {
             return ctx.reply('❌ Немає активних транзакцій для скасування.');
         }
 
-        // 2. Оновлюємо статус на is_deleted: true
-        await prisma.transaction.update({
-            where: { id: Number(lastTx.id) }, // Захист: явно приводимо id до Number
-            data: { is_deleted: true }
-        });
+        // 2. Якщо є batchId — скасовуємо весь пакет, інакше тільки її одну
+        if (lastTx.batchId) {
+            const batchTxs = await prisma.transaction.findMany({
+                where: { batchId: lastTx.batchId, is_deleted: false }
+            });
 
-        // 3. Безпечно готуємо змінні (з логічним фолбеком без виклику розривних функцій)
-        const typeLabel = lastTx.type === 'income' ? '🟢 Дохід' 
-                        : lastTx.type === 'expense' ? '🔴 Витрату' 
-                        : lastTx.type === 'transfer' ? '🔁 Переказ' 
-                        : '🟡 Операцію';
+            await prisma.transaction.updateMany({
+                where: { batchId: lastTx.batchId },
+                data: { is_deleted: true }
+            });
 
-        const rawCat = lastTx.category || 'Загальне';
-        const rawDesc = lastTx.description || 'без опису';
+            const totalAmount = batchTxs.reduce((sum, t) => sum + t.amount, 0);
 
-        // Використовуємо локальне екранування, щоб не залежати від зовнішніх функцій
-        const safeCat = String(rawCat).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-        const safeDesc = String(rawDesc).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            return await ctx.replyWithHTML(
+                `🔄 <b>ПАКЕТНУ ОПЕРАЦІЮ УСПІШНО СКАСОВАНО!</b>\n━━━━━━━━━━━━━━━━━━━\n` +
+                `❌ <b>Скасовано операцій у ланцюжку:</b> ${batchTxs.length}\n` +
+                `💵 <b>Загальна сума пакету:</b> <code>${totalAmount.toFixed(2)}</code> грн\n\n` +
+                `<i>Увесь ланцюжок дій деактивовано, баланс перераховано!</i>`
+            );
+        } else {
+            // Одинарне скасування
+            await prisma.transaction.update({
+                where: { id: Number(lastTx.id) },
+                data: { is_deleted: true }
+            });
 
-        await ctx.replyWithHTML(
-            `🔄 <b>ОПЕРАЦІЮ УСПІШНО СКАСОВАНО!</b>\n━━━━━━━━━━━━━━━━━━━\n` +
-            `❌ <b>Позначено як видалену:</b> ${typeLabel}\n` +
-            `💵 <b>Сума:</b> <code>${lastTx.amount.toFixed(2)}</code> грн\n` +
-            `🏷 <b>Категорія:</b> ${safeCat}\n` +
-            `📝 <b>Опис:</b> <i>${safeDesc}</i>\n\n` +
-            `<i>Статистика та баланс автоматично вирівняні!</i>`
-        );
+            const typeLabel = lastTx.type === 'income' ? '🟢 Дохід' 
+                            : lastTx.type === 'expense' ? '🔴 Витрату' 
+                            : lastTx.type === 'transfer' ? '🔁 Переказ' 
+                            : '🟡 Операцію';
+
+            return await ctx.replyWithHTML(
+                `🔄 <b>ОПЕРАЦІЮ УСПІШНО СКАСОВАНО!</b>\n━━━━━━━━━━━━━━━━━━━\n` +
+                `❌ <b>Позначено як видалену:</b> ${typeLabel}\n` +
+                `💵 <b>Сума:</b> <code>${lastTx.amount.toFixed(2)}</code> грн\n` +
+                `🏷 <b>Категорія:</b> ${escapeHtml(lastTx.category)}\n` +
+                `📝 <b>Опис:</b> <i>${escapeHtml(lastTx.description)}</i>\n\n` +
+                `<i>Статистика та баланс автоматично вирівняні!</i>`
+            );
+        }
     } catch (e) {
         console.error('💥 КРИТИЧНА ПОМИЛКА В /undo:', e);
         await ctx.reply('❌ Сталася помилка при спробі скасувати останню транзакцію.');
@@ -717,38 +731,60 @@ bot.on('text', async (ctx) => {
     // 3. AI-РОУТЕР: Автоматична перевірка на транзакцію у звичайному тексті
     const intentData = await classifyUserIntent(userText);
 
-    // 3.1. Обробка безшовного наміру SYNC ("по факту на карті 6500")
+   // 3.1. Обробка безшовного наміру SYNC
     if (intentData && intentData.intent === 'SYNC' && typeof intentData.amount === 'number') {
         const syncResult = await processBalanceSync(intentData.amount);
         return await ctx.replyWithHTML(syncResult.message);
     }
 
-    if (intentData && intentData.isTransaction && typeof intentData.amount === 'number') {
-        const savedTx = await prisma.transaction.create({
-            data: {
-                type: intentData.type || 'expense',
-                amount: intentData.amount,
-                source: intentData.source || 'card',
-                toSource: intentData.toSource || null,
-                category: intentData.category || 'Загальне',
-                description: intentData.description || userText,
-                workspace: intentData.workspace || 'Особисте'
-            }
-        });
+    // 3.2. Обробка TRANSACTION (одинарні та пакетні Multi-Transaction)
+    if (intentData && intentData.isTransaction && Array.isArray(intentData.transactions) && intentData.transactions.length > 0) {
+        const batchId = intentData.transactions.length > 1 ? crypto.randomUUID() : null;
+        const createdTxList = [];
 
-        const icon = intentData.type === 'income' ? '🟢' : intentData.type === 'transfer' ? '🔁' : '🔴';
-        const sourceInfo = intentData.type === 'transfer' 
-            ? ` (${intentData.source === 'card' ? '💳' : '💵'} ➔ ${intentData.toSource === 'cash' ? '💵' : '💳'})`
-            : ` (${intentData.source === 'cash' ? '💵 Готівка' : '💳 Картка'})`;
+        for (const tx of intentData.transactions) {
+            const savedTx = await prisma.transaction.create({
+                data: {
+                    type: tx.type || 'expense',
+                    amount: Number(tx.amount),
+                    source: tx.source || 'card',
+                    toSource: tx.toSource || null,
+                    category: tx.category || 'Загальне',
+                    description: tx.description || userText,
+                    workspace: tx.workspace || 'Особисте',
+                    batchId: batchId
+                }
+            });
+            createdTxList.push(savedTx);
+        }
 
-        return await ctx.replyWithHTML(
-            `✅ <b>Транзакцію зафіксовано!</b>\n\n` +
-            `${icon} <b>Сума:</b> <code>${intentData.amount.toFixed(2)}</code> грн${sourceInfo}\n` +
-            `🏷 <b>Категорія:</b> ${escapeHtml(intentData.category)}\n` +
-            `📦 <b>Простір:</b> ${intentData.workspace}\n` +
-            `📝 <b>Опис:</b> <i>${escapeHtml(intentData.description || userText)}</i>`,
-            Markup.inlineKeyboard([[Markup.button.callback('✏️ Уточнити', `edit_${savedTx.id}`)]])
-        );
+        if (createdTxList.length === 1) {
+            // Одинарна транзакція
+            const tx = createdTxList[0];
+            const icon = tx.type === 'income' ? '🟢' : tx.type === 'transfer' ? '🔁' : '🔴';
+            const sourceInfo = tx.type === 'transfer' 
+                ? ` (${tx.source === 'card' ? '💳' : '💵'} ➔ ${tx.toSource === 'cash' ? '💵' : '💳'})`
+                : ` (${tx.source === 'cash' ? '💵 Готівка' : '💳 Картка'})`;
+
+            return await ctx.replyWithHTML(
+                `✅ <b>Транзакцію зафіксовано!</b>\n\n` +
+                `${icon} <b>Сума:</b> <code>${tx.amount.toFixed(2)}</code> грн${sourceInfo}\n` +
+                `🏷 <b>Категорія:</b> ${escapeHtml(tx.category)}\n` +
+                `📦 <b>Простір:</b> ${tx.workspace}\n` +
+                `📝 <b>Опис:</b> <i>${escapeHtml(tx.description)}</i>`,
+                Markup.inlineKeyboard([[Markup.button.callback('✏️ Уточнити', `edit_${tx.id}`)]])
+            );
+        } else {
+            // Пакетна транзакція (Multi-Transaction)
+            let msg = `📦 <b>ПАКЕТНО ОБРОБЛЕНО (${createdTxList.length} ОПЕРАЦІЙ)</b>\n━━━━━━━━━━━━━━━━━━━\n`;
+            createdTxList.forEach((tx, idx) => {
+                const icon = tx.type === 'income' ? '🟢' : tx.type === 'transfer' ? '🔁' : '🔴';
+                msg += `${idx + 1}. ${icon} <b>${tx.amount.toFixed(2)} грн</b> — ${escapeHtml(tx.category)} (<i>${escapeHtml(tx.description)}</i>)\n`;
+            });
+            msg += `\n<i>Усі операції пов'язані в один пакет. Команда /undo скасує весь ланцюжок.</i>`;
+
+            return await ctx.replyWithHTML(msg);
+        }
     }
 
     // 4. AI-РАДНИК: Обробка запитань, розмов та фінансових аналізів
@@ -1219,34 +1255,35 @@ async function classifyUserIntent(userText) {
 Твоє завдання — визначити intent (TRANSACTION, SYNC, CHAT).
 
 ВАРІАНТИ INTENT:
-1. "SYNC" — якщо користувач вказує поточний реальний факт на балансі/картці (наприклад: "по факту на карті 4500", "баланс 3200 грн", "фактично на картці 5000", "на карті 6500", "реальний баланс 1200").
-2. "TRANSACTION" — якщо в тексті є чітка фінансова дія, сума чи витрата/дохід/переказ (наприклад: "зняв 500 готівки", "купив каву 60", "поповнив кеш 1000").
-3. "CHAT" — якщо це запитання, розмова, аналіз, привітання ("порадь куди вкласти", "привіт", "скільки витратив?").
-
-ЯКЩО INTENT = "SYNC":
-- isTransaction: false
-- intent: "SYNC"
-- amount: число (фактична сума, вказана користувачем)
+1. "SYNC" — якщо користувач вказує поточний реальний факт на балансі/картці (наприклад: "по факту на карті 4500", "баланс 3200 грн").
+2. "TRANSACTION" — якщо в тексті є одна АБО КІЛЬКА фінансових дій/витрат/переказів/боргів.
+3. "CHAT" — якщо це запитання, розмова, аналіз ("привіт", "порадь куди вкласти").
 
 ЯКЩО INTENT = "TRANSACTION":
-- isTransaction: true
-- intent: "TRANSACTION"
+Поверни масив "transactions" з усіма фінансовими діями, розбитими на окремі об'єкти.
+Для КОЖНОЇ дії визнач:
 - amount: число
-- type: "expense" | "income" | "transfer" | "saving"
+- type: "expense" | "income" | "transfer" | "saving" | "i_owe" | "owe_me" | "pay_debt" | "get_debt"
 - source: "card" | "cash"
 - toSource: "card" | "cash" | null
 - category: коротка категорія (1-2 слова)
 - workspace: "Особисте" або "Проєкт"
-- description: короткий опис
+- description: короткий опис конкретно цієї дії
 
-ЯКЩО INTENT = "CHAT":
-- isTransaction: false
-- intent: "CHAT"
+ПРИКЛАД JSON ДЛЯ MULTI-TRANSACTION:
+Текст: "Зняв 1000 грн готівки, купив каву за 60 грн з картки та віддав борг 200 грн"
+Відповідь:
+{
+  "isTransaction": true,
+  "intent": "TRANSACTION",
+  "transactions": [
+    {"amount": 1000, "type": "transfer", "source": "card", "toSource": "cash", "category": "Зняття готівки", "workspace": "Особисте", "description": "Зняття готівки"},
+    {"amount": 60, "type": "expense", "source": "card", "toSource": null, "category": "Кава", "workspace": "Особисте", "description": "Купив каву"},
+    {"amount": 200, "type": "pay_debt", "source": "card", "toSource": null, "category": "Погашення боргу", "workspace": "Особисте", "description": "Віддав борг"}
+  ]
+}
 
-ВІДПОВІДАЙ ВИКЛЮЧНО В ФОРМАТІ JSON без додаткових символів чи markdown.
-Приклад JSON для SYNC: {"isTransaction": false, "intent": "SYNC", "amount": 6500}
-Приклад JSON для TRANSACTION: {"isTransaction": true, "intent": "TRANSACTION", "amount": 500, "type": "transfer", "source": "card", "toSource": "cash", "category": "Зняття готівки", "workspace": "Особисте", "description": "Зняв 500 готівки"}
-`;
+ВІДПОВІДАЙ ВИКЛЮЧНО В ФОРМАТІ JSON без додаткових символів чи markdown.`;
 
     try {
         const { text: textResponse, provider } = await generateTextWithFallback(prompt);
