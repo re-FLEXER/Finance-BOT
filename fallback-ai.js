@@ -21,7 +21,7 @@ async function generateTextWithFallback(prompt) {
 
     // 2. Спроба через Groq
     try {
-        const chatCompletion = await groq.chatCompletions.create({
+        const chatCompletion = await groq.chat.completions.create({
             messages: [{ role: 'user', content: prompt }],
             model: 'groq/compound',
         });
