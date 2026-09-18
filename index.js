@@ -339,7 +339,12 @@ bot.command('setsavings', async (ctx) => {
     const targetAmount = parseFloat(args[1]);
     if (isNaN(targetAmount)) return ctx.reply('⚠️ Формат: /setsavings <сума>. Наприклад: /setsavings 5000');
 
-    const allTransactions = await prisma.transaction.findMany({ where: { OR: [{ type: 'saving' }, { type: 'init_saving' }] } });
+   const allTransactions = await prisma.transaction.findMany({ 
+        where: { 
+            is_deleted: false,
+            OR: [{ type: 'saving' }, { type: 'init_saving' }] 
+        } 
+    });
     let currentDynamicSavings = 0;
     let initSavingId = null;
 
@@ -976,7 +981,8 @@ async function getDailyReportData() {
             createdAt: {
                 gte: startOfDay,
                 lte: endOfDay
-            }
+            },
+            is_deleted: false
         }
     });
 
@@ -1014,7 +1020,8 @@ async function generateDailyAiAnalysis(dailyData) {
     const pastWeekTx = await prisma.transaction.findMany({
         where: {
             createdAt: { gte: sevenDaysAgo },
-            type: 'expense'
+            type: 'expense',
+            is_deleted: false
         }
     });
 
