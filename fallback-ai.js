@@ -9,12 +9,13 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 async function generateTextWithFallback(prompt) {
     // 1. Спроба через Gemini
     try {
-        const model = genAI.getGenerativeModel({ model: 'gemini-3.5-flash' });
-        const result = await model.generateContent(prompt);
-        return {
-            text: result.response.text(),
-            provider: 'Gemini (3.5 Flash)'
-        };
+      //  const model = genAI.getGenerativeModel({ model: 'gemini-3.5-flash' });
+      //  const result = await model.generateContent(prompt);
+      //  return {
+      //      text: result.response.text(),
+      //      provider: 'Gemini (3.5 Flash)'
+      //  };
+      throw new Error('503 Service Unavailable (Simulated)');
     } catch (geminiErr) {
         console.warn('⚠️ Gemini API відмовив (503/Error). Перемикаю на Groq...', geminiErr.message);
     }
