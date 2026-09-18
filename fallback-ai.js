@@ -7,21 +7,19 @@ const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function generateTextWithFallback(prompt) {
-    let rawText = '';
-    let providerName = '';
+    let rawText;
+    let providerName;
 
-    // 1. Спроба через Gemini (СИМУЛЯЦІЯ ПОЛОМКИ ДЛЯ ТЕСТУ)
+    // 1. Спроба через Gemini (Основний канал)
     try {
-        // const model = genAI.getGenerativeModel({ model: 'gemini-3.5-flash' });
-        // const result = await model.generateContent(prompt);
-        // rawText = result.response.text();
-        // providerName = 'Gemini (3.5 Flash)';
-        
-        throw new Error('503 Service Unavailable (Simulated for Groq Test)');
+        const model = genAI.getGenerativeModel({ model: 'gemini-3.5-flash' });
+        const result = await model.generateContent(prompt);
+        rawText = result.response.text();
+        providerName = 'Gemini (3.5 Flash)';
     } catch (geminiErr) {
         console.warn('⚠️ Gemini API відмовив (503/Error). Перемикаю на Groq...', geminiErr.message);
         
-        // 2. Спроба через Groq
+        // 2. Спроба через Groq (Резервний канал)
         try {
             const chatCompletion = await groq.chat.completions.create({
                 messages: [
@@ -38,7 +36,7 @@ async function generateTextWithFallback(prompt) {
             providerName = 'Groq (Compound)';
         } catch (groqErr) {
             console.error('❌ Groq API також відмовив:', groqErr.message);
-            throw new Error('ALL_AI_PROVIDERS_DOWN');
+            throw new Error('ALL_AI_PROVIDERS_DOWN', { cause: groqErr });
         }
     }
 
