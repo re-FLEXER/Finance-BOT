@@ -8,6 +8,7 @@ const { GoogleGenerativeAI } = require('@google/generative-ai');
 const { generateTextWithFallback, generateTextWithRetry } = require('./fallback-ai');
 const { getMonthlyAnalyticsData } = require('./monthly-analytics');
 const { generateMonthlyAudit } = require('./monthly-ai');
+const { generateTransactionsCsv } = require('./export-helpers');
 
 const app = express();
 app.use(express.json());
@@ -734,6 +735,46 @@ bot.command('monthly', async (ctx) => {
     await runAndSendMonthlyAudit(ctx.chat.id, false);
 });
 
+// --- КОМАНДА /export (Експорт в CSV) ---
+bot.command('export', async (ctx) => {
+    const args = ctx.message.text.split(' ');
+    const isMonthOnly = args[1]?.toLowerCase() === 'month';
+
+    const statusMsg = await ctx.reply('⏳ Формую CSV-файл з транзакціями...');
+
+    try {
+        const { count, csvBuffer } = await generateTransactionsCsv(isMonthOnly);
+
+        if (count === 0) {
+            await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
+            return await ctx.reply('📊 База даних порожня або немає транзакцій за вказаний період.');
+        }
+
+        const now = new Date().toISOString().split('T')[0];
+        const fileName = isMonthOnly 
+            ? `finance_export_month_${now}.csv`
+            : `finance_export_full_${now}.csv`;
+
+        await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
+
+        await ctx.replyWithDocument(
+            { source: csvBuffer, filename: fileName },
+            {
+                caption: `📥 <b>ВАШ ФІНАНСОВИЙ ЕКСПОРТ ГОТОВИЙ</b>\n` +
+                         `━━━━━━━━━━━━━━━━━━━\n` +
+                         `📊 Усього транзакцій: <code>${count}</code>\n` +
+                         `📅 Тип: <b>${isMonthOnly ? 'Поточний місяць' : 'Уся історія'}</b>\n\n` +
+                         `<i>Файл повністю готовий для відкриття в Excel, Google Таблицях або передачі аудитору.</i>`,
+                parse_mode: 'HTML'
+            }
+        );
+    } catch (e) {
+        console.error('💥 Помилка виконання /export:', e);
+        await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
+        await ctx.reply('❌ Сталася помилка під час формування CSV-файлу.');
+    }
+});
+
 // --- ОБРОБКА ТЕКСТОВИХ ПОВІДОМЛЕНЬ ТА РАДНИКА AI З ПАМ'ЯТЮ ---
 bot.on('text', async (ctx) => {
     const userId = ctx.from.id;
@@ -1340,6 +1381,7 @@ app.listen(PORT, async () => {
             { command: 'sync', description: '🔄 Синхронізувати баланс з карткою' },
             { command: 'undo', description: '🔄 Скасувати останню операцію (Ctrl+Z)' },
             { command: 'monthly', description: '🔥 Глибокий AI-аудит за місяць' },
+            { command: 'export', description: '📥 Експорт транзакцій у CSV (Excel)' },
             { command: 'setsavings', description: '🟡 Встановити суму збережень' },
             { command: 'setbalance', description: '💵 Встановити початковий залишок' },
             { command: 'debt', description: '🤝 Взяв у борг (Пасив)' },
@@ -1363,6 +1405,36 @@ app.listen(PORT, async () => {
         await bot.telegram.setWebhook(fullWebhookUrl);
         console.log(`Telegram Webhook встановлено: ${fullWebhookUrl}`);
     }
+});
+
+// --- КРОН 4. Автоматичний щотижневий бекап бази (неділя о 23:00) ---
+cron.schedule('0 23 * * 0', async () => {
+    console.log('📦 Запуск автоматичного щотижневого бекапу...');
+    try {
+        const { count, csvBuffer } = await generateTransactionsCsv(false);
+
+        if (count === 0 || !csvBuffer) return;
+
+        const now = new Date().toISOString().split('T')[0];
+        const fileName = `weekly_backup_${now}.csv`;
+
+        await bot.telegram.sendDocument(
+            process.env.MY_CHAT_ID,
+            { source: csvBuffer, filename: fileName },
+            {
+                caption: `🛡 <b>АВТОМАТИЧНИЙ ЩОТИЖНЕВИЙ БЕКАП БАЗИ</b>\n` +
+                         `━━━━━━━━━━━━━━━━━━━\n` +
+                         `💾 Повна копія історії фінансів успішно збережена.\n` +
+                         `📊 Записів у базі: <code>${count}</code>\n` +
+                         `📁 Файл: <code>${fileName}</code>`,
+                parse_mode: 'HTML'
+            }
+        );
+    } catch (error) {
+        console.error('💥 Помилка виконання щотижневого бекапу:', error);
+    }
+}, {
+    timezone: "Europe/Kyiv"
 });
 
 // --- AI-РОУТЕР/КЛАСИФІКАТОР НАМІРІВ ---

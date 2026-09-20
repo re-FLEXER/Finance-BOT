@@ -15,6 +15,7 @@
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "groq-sdk": "^1.6.0",
+    "json2csv": "^6.0.0-alpha.2",
     "node-cron": "^4.6.0",
     "telegraf": "^4.16.3"
   },
