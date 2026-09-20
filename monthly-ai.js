@@ -4,7 +4,7 @@ const { generateTextWithFallback } = require('./fallback-ai');
  * Формує AI-аудит на основі зібраних аналітичних даних
  */
 async function generateMonthlyAudit(analyticsData) {
-    const { metrics, topCategories, isFirstMonth } = analyticsData;
+    const { metrics, topCategories } = analyticsData;
 
     // Готуємо текстову вижимку для промпту
     const categoriesSummary = topCategories.map((c, i) => {
@@ -52,7 +52,6 @@ ${categoriesSummary}
         const { text: rawResponse, provider } = await generateTextWithFallback(prompt);
         console.log(`🤖 AI Audit згенеровано через: ${provider}`);
 
-        // Санітар-парсер
         let cleanText = rawResponse.trim()
             .replace(/```json/gi, '')
             .replace(/```/g, '');
