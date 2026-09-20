@@ -635,35 +635,33 @@ bot.action(/^edit_(\d+)$/, async (ctx) => {
     await ctx.reply('✍️ Вкажи уточнення для цієї транзакції (наприклад: <i>"Одяг, купив куртку"</i>):', { parse_mode: 'HTML' });
 });
 
-// --- КОМАНДА /monthly (AI Фінансовий Аудит) ---
-bot.command('monthly', async (ctx) => {
-    // Стильний та емоційний екран очікування
-    const loadingMsg = await ctx.replyWithHTML(
-        `💼 <b>ВИКЛИКАЮ ФІНАНСОВОГО АУДИТОРА...</b>\n` +
-        `━━━━━━━━━━━━━━━━━━━\n` +
-        `📊 Збираю дані про ваші статки, доходи та борги...\n` +
-        `🔍 Шукаю "пожирачів" бюджету серед ТОП-10 категорій...\n` +
-        `🧠 Готую жорсткий аналіз та "прожарку"...\n\n` +
-        `<i>Зачекайте 10-15 секунд, аудитор вивчає ваші чеки ⏳</i>`
-    );
+// --- ЄДИНА ФУНКЦІЯ ФОРМУВАННЯ ТА ВІДПРАВКИ МІСЯЧНОГО АУДИТУ (DRY) ---
+async function runAndSendMonthlyAudit(chatId, isAuto = false) {
+    let loadingMsg = null;
+    if (!isAuto) {
+        loadingMsg = await bot.telegram.sendMessage(chatId, 
+            `💼 <b>ВИКЛИКАЮ ФІНАНСОВОГО АУДИТОРА...</b>\n` +
+            `━━━━━━━━━━━━━━━━━━━\n` +
+            `📊 Збираю дані про ваші статки, доходи та борги...\n` +
+            `🔍 Шукаю "пожирачів" бюджету серед ТОП-10 категорій...\n` +
+            `🧠 Готую жорсткий аналіз та "прожарку"...\n\n` +
+            `<i>Зачекайте 10-15 секунд, аудитор вивчає ваші чеки ⏳</i>`, 
+            { parse_mode: 'HTML' }
+        );
+    }
 
     try {
-        // 1. Збір аналітики з БД
         const analytics = await getMonthlyAnalyticsData();
 
-        // Перевірка на порожній місяць
         if (analytics.metrics.income === 0 && analytics.metrics.expense === 0) {
-            await ctx.telegram.deleteMessage(ctx.chat.id, loadingMsg.message_id);
-            return await ctx.reply('📊 У цьому місяці ще немає жодної зафіксованої транзакції. Почни вести бюджет, а потім приходь за аудитом!');
+            if (loadingMsg) await bot.telegram.deleteMessage(chatId, loadingMsg.message_id).catch(() => {});
+            return await bot.telegram.sendMessage(chatId, '📊 У цьому місяці ще немає жодної зафіксованої транзакції. Почни вести бюджет, а потім приходь за аудитом!');
         }
 
-        // 2. Генерація AI-аудиту
         const aiResult = await generateMonthlyAudit(analytics);
-
-        // 3. Формування тексту "Сухих цифр"
         const m = analytics.metrics;
         const deltaIcon = m.delta >= 0 ? '🟢' : '🔴';
-        
+
         let top10Text = '';
         analytics.topCategories.forEach((c, i) => {
             const trendText = c.diffPercentage !== null 
@@ -678,7 +676,6 @@ bot.command('monthly', async (ctx) => {
             const audit = aiResult.audit;
             const rating = Number(audit.rating) || 5;
 
-            // Динамічний заголовок за "Рейтингом П*здєца"
             let headerBadge = '⚠️ <b>Є ПИТАННЯ ДО БЮДЖЕТУ</b>';
             if (rating <= 3) headerBadge = '🚨 <b>ФІНАНСОВА КАТАСТРОФА</b>';
             if (rating >= 8) headerBadge = '👑 <b>ВОВК З УОЛЛ-СТРІТ</b>';
@@ -690,8 +687,10 @@ bot.command('monthly', async (ctx) => {
                 });
             }
 
+            const autoHeader = isAuto ? `📅 <b>АВТОМАТИЧНИЙ ЗВІТ ЗА МІСЯЦЬ</b>\n` : '';
+
             responseMessage = 
-                `${headerBadge} (Оцінка: <b>${rating}/10</b>)\n` +
+                `${autoHeader}${headerBadge} (Оцінка: <b>${rating}/10</b>)\n` +
                 `━━━━━━━━━━━━━━━━━━━\n\n` +
                 `📊 <b>ЦИФРИ МІСЯЦЯ:</b>\n` +
                 `🟢 Доходи: <code>${m.income.toFixed(2)}</code> грн\n` +
@@ -700,7 +699,7 @@ bot.command('monthly', async (ctx) => {
                 `💰 Загальний капітал: <code>${m.totalCapital.toFixed(2)}</code> грн\n` +
                 `🏦 Заощаджено: <code>${m.savings.toFixed(2)}</code> грн\n` +
                 `⚠️ Мій борг: <code>${m.myDebt.toFixed(2)}</code> грн\n\n` +
-                `🏆 <b>ТОП-10 ПОЖИРАЧІВ:</b>\n${top10Text}\n` +
+                `🏆 <b>ТОП-10 ПОЖИРАЧІВ ВИТРАТ:</b>\n${top10Text}\n` +
                 `🗣 <b>ВЕРДИКТ АУДИТОРА:</b>\n<i>"${escapeHtml(audit.verdict)}"</i>\n\n` +
                 `🧨 <b>ПРОЖАРКА:</b>\n${escapeHtml(audit.roast_section)}\n\n` +
                 `🤝 <b>ЩО ХОРОШОГО:</b>\n${escapeHtml(audit.praise_section)}\n\n` +
@@ -715,18 +714,24 @@ bot.command('monthly', async (ctx) => {
                 `${deltaIcon} Дельта: <code>${m.delta.toFixed(2)}</code> грн\n` +
                 `💰 Загальний капітал: <code>${m.totalCapital.toFixed(2)}</code> грн\n` +
                 `⚠️ Борг: <code>${m.myDebt.toFixed(2)}</code> грн\n\n` +
-                `🏆 <b>ТОП-3 ПОЖИРАЧІ:</b>\n${top10Text}\n` +
+                `🏆 <b>ТОП-10 ПОЖИРАЧІВ ВИТРАТ:</b>\n${top10Text}\n` +
                 `⚠️ <i>AI-Аудитор тимчасово недоступний, але цифри пораховано точно.</i>`;
         }
 
-        await ctx.telegram.deleteMessage(ctx.chat.id, loadingMsg.message_id);
-        return await ctx.replyWithHTML(responseMessage);
+        if (loadingMsg) await bot.telegram.deleteMessage(chatId, loadingMsg.message_id).catch(() => {});
+        await bot.telegram.sendMessage(chatId, responseMessage, { parse_mode: 'HTML' });
+        await saveChatMessage(chatId, 'model', responseMessage);
 
     } catch (e) {
-        console.error('💥 Помилка виконання /monthly:', e);
-        await ctx.telegram.deleteMessage(ctx.chat.id, loadingMsg.message_id).catch(() => {});
-        return await ctx.reply('❌ Сталася помилка під час формування місячного аудиту.');
+        console.error('💥 Помилка виконання місячного аудиту:', e);
+        if (loadingMsg) await bot.telegram.deleteMessage(chatId, loadingMsg.message_id).catch(() => {});
+        await bot.telegram.sendMessage(chatId, '❌ Сталася помилка під час формування місячного аудиту.');
     }
+}
+
+// --- КОМАНДА /monthly (Ручний виклик) ---
+bot.command('monthly', async (ctx) => {
+    await runAndSendMonthlyAudit(ctx.chat.id, false);
 });
 
 // --- ОБРОБКА ТЕКСТОВИХ ПОВІДОМЛЕНЬ ТА РАДНИКА AI З ПАМ'ЯТЮ ---
@@ -1189,6 +1194,21 @@ async function generateDailyAiAnalysis(dailyData) {
     const result = await generateTextWithRetry(prompt, 5, 12000);
     return result; // Повертає { text, provider }
 }
+
+// Автоматичний щомісячний аудит (останній день місяця о 23:55)
+cron.schedule('55 23 28-31 * *', async () => {
+    const now = new Date();
+    const tomorrow = new Date(now);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+
+    // Перевіряємо, чи завтра вже 1-ше число (тобто сьогодні останній день місяця)
+    if (tomorrow.getDate() === 1) {
+        console.log('📅 Авто-запуск місячного аудиту за останніми даними...');
+        await runAndSendMonthlyAudit(process.env.MY_CHAT_ID, true);
+    }
+}, {
+    timezone: "Europe/Kyiv"
+});
 
 // --- 1. АВТОМАТИЧНИЙ ЩОДЕННИЙ ЗВІТ (23:54) ---
 cron.schedule('54 23 * * *', async () => {
