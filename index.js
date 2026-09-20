@@ -6,6 +6,8 @@ const { Telegraf, Markup } = require('telegraf');
 const { PrismaClient } = require('@prisma/client');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const { generateTextWithFallback, generateTextWithRetry } = require('./fallback-ai');
+const { getMonthlyAnalyticsData } = require('./monthly-analytics');
+const { generateMonthlyAudit } = require('./monthly-ai');
 
 const app = express();
 app.use(express.json());
@@ -250,13 +252,14 @@ const helpMessage = `
 
 📊 <b>Основи та Статистика:</b>
 • /stats — Переглянути фінансову статистику та реальний залишок.
+• /monthly — 🔥 <b>Фінансовий аудит за місяць</b> (Прожарка від AI у стилі Кнопка Аліна + ТОП-10 категорій + план дій).
 • /setbalance <code>&lt;сума&gt;</code> — Встановити початковий залишок (точка відліку на картці).
 • /sync <code>&lt;сума&gt;</code> — <b>Синхронізувати баланс</b>. Вирівнює баланс бота з реальною карткою.
 • /setsavings <code>&lt;сума&gt;</code> — Синхронізувати суму збережень (Банка/Готівка).
 
 🤝 <b>Модуль Боргів (Debt Tracker):</b>
 • /debt <code>&lt;сума&gt; &lt;ім'я&gt;</code> — Зафіксувати, що ти взяв у борг (Пасив).
-• /lend <code>&lt;сума&gt; &lt;ім'я&gt;</code> — Зафіксувати, що ти дав у борг (Актив).
+• /lend <code>&lt;сума&gt; &lt;кому дав&gt;</code> — Зафіксувати, що ти дав у борг (Актив).
 • /paydebt <code>&lt;сума&gt;</code> — Погасити частину/весь свій борг.
 • /getdebt <code>&lt;сума&gt;</code> — Зафіксувати, що тобі повернули борг.
 
@@ -1222,6 +1225,7 @@ app.listen(PORT, async () => {
             { command: 'stats', description: '📊 Фінансова статистика' },
             { command: 'sync', description: '🔄 Синхронізувати баланс з карткою' },
             { command: 'undo', description: '🔄 Скасувати останню операцію (Ctrl+Z)' },
+            { command: 'monthly', description: '🔥 Глибокий AI-аудит за місяць' },
             { command: 'setsavings', description: '🟡 Встановити суму збережень' },
             { command: 'setbalance', description: '💵 Встановити початковий залишок' },
             { command: 'debt', description: '🤝 Взяв у борг (Пасив)' },
@@ -1295,3 +1299,87 @@ async function classifyUserIntent(userText) {
         return { isTransaction: false, intent: "CHAT" };
     }
 }
+
+// --- КОМАНДА /monthly (AI Фінансовий Аудит) ---
+bot.command('monthly', async (ctx) => {
+    const loadingMsg = await ctx.reply('🔍 Збираю аналітику та викликаю фінансового аудитора... Зачекайте хвилинку ⏳');
+
+    try {
+        // 1. Збір аналітики з БД
+        const analytics = await getMonthlyAnalyticsData();
+
+        // Перевірка на порожній місяць
+        if (analytics.metrics.income === 0 && analytics.metrics.expense === 0) {
+            await ctx.telegram.deleteMessage(ctx.chat.id, loadingMsg.message_id);
+            return await ctx.reply('📊 У цьому місяці ще немає жодної зафіксованої транзакції. Почни вести бюджет, а потім приходь за аудитом!');
+        }
+
+        // 2. Генерація AI-аудиту
+        const aiResult = await generateMonthlyAudit(analytics);
+
+        // 3. Формування тексту "Сухих цифр"
+        const m = analytics.metrics;
+        const deltaIcon = m.delta >= 0 ? '🟢' : '🔴';
+        
+        let top3Text = '';
+        analytics.topCategories.slice(0, 3).forEach((c, i) => {
+            top3Text += `   ${i + 1}. <b>${escapeHtml(c.category)}</b>: <code>${c.amount.toFixed(2)}</code> грн\n`;
+        });
+
+        let responseMessage = '';
+
+        if (aiResult.success) {
+            const audit = aiResult.audit;
+            const rating = Number(audit.rating) || 5;
+
+            // Динамічний заголовок за "Рейтингом П*здєца"
+            let headerBadge = '⚠️ <b>Є ПИТАННЯ ДО БЮДЖЕТУ</b>';
+            if (rating <= 3) headerBadge = '🚨 <b>ФІНАНСОВА КАТАСТРОФА</b>';
+            if (rating >= 8) headerBadge = '👑 <b>ВОВК З УОЛЛ-СТРІТ</b>';
+
+            let actionPlanText = '';
+            if (Array.isArray(audit.action_plan)) {
+                audit.action_plan.forEach(step => {
+                    actionPlanText += `🔹 ${escapeHtml(step)}\n`;
+                });
+            }
+
+            responseMessage = 
+                `${headerBadge} (Оцінка: <b>${rating}/10</b>)\n` +
+                `━━━━━━━━━━━━━━━━━━━\n\n` +
+                `📊 <b>ЦИФРИ МІСЯЦЯ:</b>\n` +
+                `🟢 Доходи: <code>${m.income.toFixed(2)}</code> грн\n` +
+                `🔴 Витрати: <code>${m.expense.toFixed(2)}</code> грн\n` +
+                `${deltaIcon} Дельта: <code>${m.delta.toFixed(2)}</code> грн\n` +
+                `💰 Загальний капітал: <code>${m.totalCapital.toFixed(2)}</code> грн\n` +
+                `🏦 Заощаджено: <code>${m.savings.toFixed(2)}</code> грн\n` +
+                `⚠️ Мій борг: <code>${m.myDebt.toFixed(2)}</code> грн\n\n` +
+                `🏆 <b>ТОП-3 ПОЖИРАЧІ:</b>\n${top3Text}\n` +
+                `🗣 <b>ВЕРДИКТ АУДИТОРА:</b>\n<i>"${escapeHtml(audit.verdict)}"</i>\n\n` +
+                `🧨 <b>ПРОЖАРКА:</b>\n${escapeHtml(audit.roast_section)}\n\n` +
+                `🤝 <b>ЩО ХОРОШОГО:</b>\n${escapeHtml(audit.praise_section)}\n\n` +
+                `📝 <b>ПЛАН ДІЙ НА НАСТУПНИЙ МІСЯЦЬ:</b>\n${actionPlanText}\n` +
+                `🤖 <i>Аудит згенеровано через: ${aiResult.provider}</i>`;
+        } else {
+            // Фолбек, якщо AI не зміг згенерувати текстовий аудит
+            responseMessage = 
+                `📊 <b>ЗВІТ ЗА МІСЯЦЬ (СУХІ ЦИФРИ)</b>\n` +
+                `━━━━━━━━━━━━━━━━━━━\n\n` +
+                `🟢 Доходи: <code>${m.income.toFixed(2)}</code> грн\n` +
+                `🔴 Витрати: <code>${m.expense.toFixed(2)}</code> грн\n` +
+                `${deltaIcon} Дельта: <code>${m.delta.toFixed(2)}</code> грн\n` +
+                `💰 Загальний капітал: <code>${m.totalCapital.toFixed(2)}</code> грн\n` +
+                `⚠️ Борг: <code>${m.myDebt.toFixed(2)}</code> грн\n\n` +
+                `🏆 <b>ТОП-3 ПОЖИРАЧІ:</b>\n${top3Text}\n` +
+                `⚠️ <i>AI-Аудитор тимчасово недоступний, але цифри пораховано точно.</i>`;
+        }
+
+        await ctx.telegram.deleteMessage(ctx.chat.id, loadingMsg.message_id);
+        return await ctx.replyWithHTML(responseMessage);
+
+    } catch (e) {
+        console.error('💥 Помилка виконання /monthly:', e);
+        await ctx.telegram.deleteMessage(ctx.chat.id, loadingMsg.message_id).catch(() => {});
+        return await ctx.reply('❌ Сталася помилка під час формування місячного аудиту.');
+    }
+});
