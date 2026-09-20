@@ -4,7 +4,8 @@ const { generateTextWithFallback } = require('./fallback-ai');
  * Формує AI-аудит на основі зібраних аналітичних даних
  */
 async function generateMonthlyAudit(analyticsData) {
-    const { metrics, topCategories } = analyticsData;
+    // 1. Додаємо isFirstMonth з об'єкта аналітики
+    const { metrics, topCategories, isFirstMonth } = analyticsData;
 
     // Готуємо текстову вижимку для промпту
     const categoriesSummary = topCategories.map((c, i) => {
@@ -14,8 +15,15 @@ async function generateMonthlyAudit(analyticsData) {
         return `${i + 1}.${c.category}: ${c.amount.toFixed(2)} грн ${trend}`;
     }).join('\n');
 
+    // 2. Формуємо спеціальний контекст для першого місяця
+    const monthContextNote = isFirstMonth 
+        ? "⚠️ КОНТЕКСТ: Це ПЕРШИЙ місяць використання бота користувачем. Даних за минулий місяць НЕМАЄ. Не описуй тренди порівняно з минулим місяцем і не вигадуй порівнянь, оцінюй тільки поточні цифри."
+        : "КОНТЕКСТ: Є дані за минулий місяць. Зверни увагу на зміни витрат (тренди) у категоріях.";
+
     const prompt = `Ти — жорсткий, саркастичний, але конструктивний фінансовий аудитор у стилі популярного YouTube-каналу "Кнопка Аліна".
 Твоє завдання — проаналізувати місячний фінансовий звіт користувача та надати жорсткий, тверезий, але корисний аудит.
+
+${monthContextNote}
 
 ТОН ТА СТИЛЬ:
 - Прямолінійний, із сарказмом, емоційний, молодіжний сленг.
@@ -23,7 +31,7 @@ async function generateMonthlyAudit(analyticsData) {
 - Якщо людина має борги, але витрачає на Вейп, Фастфуд чи Підписки — рознеси це в тріски.
 - Якщо людина віддає борги або заощаджує — похвали за інстинкт самозбереження, але не давай розслаблятися.
 
-ФІНАНСОВІ ДАНІ ЗА МІСЯЦЬ:
+ФІНАНСОВИЙ ЗВІТ ЗА МІСЯЦЬ:
 - Доходи: ${metrics.income.toFixed(2)} грн
 - Витрати: ${metrics.expense.toFixed(2)} грн
 - Чиста дельта: ${metrics.delta.toFixed(2)} грн
@@ -31,7 +39,7 @@ async function generateMonthlyAudit(analyticsData) {
 - Мій борг (пасив): ${metrics.myDebt.toFixed(2)} грн
 - Загальний капітал: ${metrics.totalCapital.toFixed(2)} грн
 
-ТОП-10 КАТЕГОРІЙ ВИТРАТ (ТА ТРЕНД З МИНУЛОГО МІСЯЦЯ):
+ТОП-10 КАТЕГОРІЙ ВИТРАТ:
 ${categoriesSummary}
 
 ВИМОГИ ДО ФОРМАТУ ВІДПОВІДІ (ЖОРСТКИЙ JSON):
