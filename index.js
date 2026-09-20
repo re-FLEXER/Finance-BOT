@@ -664,9 +664,12 @@ bot.command('monthly', async (ctx) => {
         const m = analytics.metrics;
         const deltaIcon = m.delta >= 0 ? '🟢' : '🔴';
         
-        let top3Text = '';
-        analytics.topCategories.slice(0, 3).forEach((c, i) => {
-            top3Text += `   ${i + 1}. <b>${escapeHtml(c.category)}</b>: <code>${c.amount.toFixed(2)}</code> грн\n`;
+        let top10Text = '';
+        analytics.topCategories.forEach((c, i) => {
+            const trendText = c.diffPercentage !== null 
+                ? ` <i>(${c.diff > 0 ? '+' : ''}${c.diff.toFixed(2)} грн)</i>`
+                : '';
+            top10Text += `   ${i + 1}. <b>${escapeHtml(c.category)}</b>: <code>${c.amount.toFixed(2)}</code> грн${trendText}\n`;
         });
 
         let responseMessage = '';
@@ -697,7 +700,7 @@ bot.command('monthly', async (ctx) => {
                 `💰 Загальний капітал: <code>${m.totalCapital.toFixed(2)}</code> грн\n` +
                 `🏦 Заощаджено: <code>${m.savings.toFixed(2)}</code> грн\n` +
                 `⚠️ Мій борг: <code>${m.myDebt.toFixed(2)}</code> грн\n\n` +
-                `🏆 <b>ТОП-3 ПОЖИРАЧІ:</b>\n${top3Text}\n` +
+                `🏆 <b>ТОП-10 ПОЖИРАЧІВ:</b>\n${top10Text}\n` +
                 `🗣 <b>ВЕРДИКТ АУДИТОРА:</b>\n<i>"${escapeHtml(audit.verdict)}"</i>\n\n` +
                 `🧨 <b>ПРОЖАРКА:</b>\n${escapeHtml(audit.roast_section)}\n\n` +
                 `🤝 <b>ЩО ХОРОШОГО:</b>\n${escapeHtml(audit.praise_section)}\n\n` +
@@ -712,7 +715,7 @@ bot.command('monthly', async (ctx) => {
                 `${deltaIcon} Дельта: <code>${m.delta.toFixed(2)}</code> грн\n` +
                 `💰 Загальний капітал: <code>${m.totalCapital.toFixed(2)}</code> грн\n` +
                 `⚠️ Борг: <code>${m.myDebt.toFixed(2)}</code> грн\n\n` +
-                `🏆 <b>ТОП-3 ПОЖИРАЧІ:</b>\n${top3Text}\n` +
+                `🏆 <b>ТОП-3 ПОЖИРАЧІ:</b>\n${top10Text}\n` +
                 `⚠️ <i>AI-Аудитор тимчасово недоступний, але цифри пораховано точно.</i>`;
         }
 
