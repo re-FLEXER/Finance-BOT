@@ -635,6 +635,97 @@ bot.action(/^edit_(\d+)$/, async (ctx) => {
     await ctx.reply('✍️ Вкажи уточнення для цієї транзакції (наприклад: <i>"Одяг, купив куртку"</i>):', { parse_mode: 'HTML' });
 });
 
+// --- КОМАНДА /monthly (AI Фінансовий Аудит) ---
+bot.command('monthly', async (ctx) => {
+    // Стильний та емоційний екран очікування
+    const loadingMsg = await ctx.replyWithHTML(
+        `💼 <b>ВИКЛИКАЮ ФІНАНСОВОГО АУДИТОРА...</b>\n` +
+        `━━━━━━━━━━━━━━━━━━━\n` +
+        `📊 Збираю дані про ваші статки, доходи та борги...\n` +
+        `🔍 Шукаю "пожирачів" бюджету серед ТОП-10 категорій...\n` +
+        `🧠 Готую жорсткий аналіз та "прожарку"...\n\n` +
+        `<i>Зачекайте 10-15 секунд, аудитор вивчає ваші чеки ⏳</i>`
+    );
+
+    try {
+        // 1. Збір аналітики з БД
+        const analytics = await getMonthlyAnalyticsData();
+
+        // Перевірка на порожній місяць
+        if (analytics.metrics.income === 0 && analytics.metrics.expense === 0) {
+            await ctx.telegram.deleteMessage(ctx.chat.id, loadingMsg.message_id);
+            return await ctx.reply('📊 У цьому місяці ще немає жодної зафіксованої транзакції. Почни вести бюджет, а потім приходь за аудитом!');
+        }
+
+        // 2. Генерація AI-аудиту
+        const aiResult = await generateMonthlyAudit(analytics);
+
+        // 3. Формування тексту "Сухих цифр"
+        const m = analytics.metrics;
+        const deltaIcon = m.delta >= 0 ? '🟢' : '🔴';
+        
+        let top3Text = '';
+        analytics.topCategories.slice(0, 3).forEach((c, i) => {
+            top3Text += `   ${i + 1}. <b>${escapeHtml(c.category)}</b>: <code>${c.amount.toFixed(2)}</code> грн\n`;
+        });
+
+        let responseMessage = '';
+
+        if (aiResult.success) {
+            const audit = aiResult.audit;
+            const rating = Number(audit.rating) || 5;
+
+            // Динамічний заголовок за "Рейтингом П*здєца"
+            let headerBadge = '⚠️ <b>Є ПИТАННЯ ДО БЮДЖЕТУ</b>';
+            if (rating <= 3) headerBadge = '🚨 <b>ФІНАНСОВА КАТАСТРОФА</b>';
+            if (rating >= 8) headerBadge = '👑 <b>ВОВК З УОЛЛ-СТРІТ</b>';
+
+            let actionPlanText = '';
+            if (Array.isArray(audit.action_plan)) {
+                audit.action_plan.forEach(step => {
+                    actionPlanText += `🔹 ${escapeHtml(step)}\n`;
+                });
+            }
+
+            responseMessage = 
+                `${headerBadge} (Оцінка: <b>${rating}/10</b>)\n` +
+                `━━━━━━━━━━━━━━━━━━━\n\n` +
+                `📊 <b>ЦИФРИ МІСЯЦЯ:</b>\n` +
+                `🟢 Доходи: <code>${m.income.toFixed(2)}</code> грн\n` +
+                `🔴 Витрати: <code>${m.expense.toFixed(2)}</code> грн\n` +
+                `${deltaIcon} Дельта: <code>${m.delta.toFixed(2)}</code> грн\n` +
+                `💰 Загальний капітал: <code>${m.totalCapital.toFixed(2)}</code> грн\n` +
+                `🏦 Заощаджено: <code>${m.savings.toFixed(2)}</code> грн\n` +
+                `⚠️ Мій борг: <code>${m.myDebt.toFixed(2)}</code> грн\n\n` +
+                `🏆 <b>ТОП-3 ПОЖИРАЧІ:</b>\n${top3Text}\n` +
+                `🗣 <b>ВЕРДИКТ АУДИТОРА:</b>\n<i>"${escapeHtml(audit.verdict)}"</i>\n\n` +
+                `🧨 <b>ПРОЖАРКА:</b>\n${escapeHtml(audit.roast_section)}\n\n` +
+                `🤝 <b>ЩО ХОРОШОГО:</b>\n${escapeHtml(audit.praise_section)}\n\n` +
+                `📝 <b>ПЛАН ДІЙ НА НАСТУПНИЙ МІСЯЦЬ:</b>\n${actionPlanText}\n` +
+                `🤖 <i>Аудит згенеровано через: ${aiResult.provider}</i>`;
+        } else {
+            responseMessage = 
+                `📊 <b>ЗВІТ ЗА МІСЯЦЬ (СУХІ ЦИФРИ)</b>\n` +
+                `━━━━━━━━━━━━━━━━━━━\n\n` +
+                `🟢 Доходи: <code>${m.income.toFixed(2)}</code> грн\n` +
+                `🔴 Витрати: <code>${m.expense.toFixed(2)}</code> грн\n` +
+                `${deltaIcon} Дельта: <code>${m.delta.toFixed(2)}</code> грн\n` +
+                `💰 Загальний капітал: <code>${m.totalCapital.toFixed(2)}</code> грн\n` +
+                `⚠️ Борг: <code>${m.myDebt.toFixed(2)}</code> грн\n\n` +
+                `🏆 <b>ТОП-3 ПОЖИРАЧІ:</b>\n${top3Text}\n` +
+                `⚠️ <i>AI-Аудитор тимчасово недоступний, але цифри пораховано точно.</i>`;
+        }
+
+        await ctx.telegram.deleteMessage(ctx.chat.id, loadingMsg.message_id);
+        return await ctx.replyWithHTML(responseMessage);
+
+    } catch (e) {
+        console.error('💥 Помилка виконання /monthly:', e);
+        await ctx.telegram.deleteMessage(ctx.chat.id, loadingMsg.message_id).catch(() => {});
+        return await ctx.reply('❌ Сталася помилка під час формування місячного аудиту.');
+    }
+});
+
 // --- ОБРОБКА ТЕКСТОВИХ ПОВІДОМЛЕНЬ ТА РАДНИКА AI З ПАМ'ЯТЮ ---
 bot.on('text', async (ctx) => {
     const userId = ctx.from.id;
@@ -1300,93 +1391,3 @@ async function classifyUserIntent(userText) {
     }
 }
 
-// --- КОМАНДА /monthly (AI Фінансовий Аудит) ---
-bot.command('monthly', async (ctx) => {
-    // Стильний та емоційний екран очікування
-    const loadingMsg = await ctx.replyWithHTML(
-        `💼 <b>ВИКЛИКАЮ ФІНАНСОВОГО АУДИТОРА...</b>\n` +
-        `━━━━━━━━━━━━━━━━━━━\n` +
-        `📊 Збираю дані про ваші статки, доходи та борги...\n` +
-        `🔍 Шукаю "пожирачів" бюджету серед ТОП-10 категорій...\n` +
-        `🧠 Готую жорсткий аналіз та "прожарку"...\n\n` +
-        `<i>Зачекайте 10-15 секунд, аудитор вивчає ваші чеки ⏳</i>`
-    );
-
-    try {
-        // 1. Збір аналітики з БД
-        const analytics = await getMonthlyAnalyticsData();
-
-        // Перевірка на порожній місяць
-        if (analytics.metrics.income === 0 && analytics.metrics.expense === 0) {
-            await ctx.telegram.deleteMessage(ctx.chat.id, loadingMsg.message_id);
-            return await ctx.reply('📊 У цьому місяці ще немає жодної зафіксованої транзакції. Почни вести бюджет, а потім приходь за аудитом!');
-        }
-
-        // 2. Генерація AI-аудиту
-        const aiResult = await generateMonthlyAudit(analytics);
-
-        // 3. Формування тексту "Сухих цифр"
-        const m = analytics.metrics;
-        const deltaIcon = m.delta >= 0 ? '🟢' : '🔴';
-        
-        let top3Text = '';
-        analytics.topCategories.slice(0, 3).forEach((c, i) => {
-            top3Text += `   ${i + 1}. <b>${escapeHtml(c.category)}</b>: <code>${c.amount.toFixed(2)}</code> грн\n`;
-        });
-
-        let responseMessage = '';
-
-        if (aiResult.success) {
-            const audit = aiResult.audit;
-            const rating = Number(audit.rating) || 5;
-
-            // Динамічний заголовок за "Рейтингом П*здєца"
-            let headerBadge = '⚠️ <b>Є ПИТАННЯ ДО БЮДЖЕТУ</b>';
-            if (rating <= 3) headerBadge = '🚨 <b>ФІНАНСОВА КАТАСТРОФА</b>';
-            if (rating >= 8) headerBadge = '👑 <b>ВОВК З УОЛЛ-СТРІТ</b>';
-
-            let actionPlanText = '';
-            if (Array.isArray(audit.action_plan)) {
-                audit.action_plan.forEach(step => {
-                    actionPlanText += `🔹 ${escapeHtml(step)}\n`;
-                });
-            }
-
-            responseMessage = 
-                `${headerBadge} (Оцінка: <b>${rating}/10</b>)\n` +
-                `━━━━━━━━━━━━━━━━━━━\n\n` +
-                `📊 <b>ЦИФРИ МІСЯЦЯ:</b>\n` +
-                `🟢 Доходи: <code>${m.income.toFixed(2)}</code> грн\n` +
-                `🔴 Витрати: <code>${m.expense.toFixed(2)}</code> грн\n` +
-                `${deltaIcon} Дельта: <code>${m.delta.toFixed(2)}</code> грн\n` +
-                `💰 Загальний капітал: <code>${m.totalCapital.toFixed(2)}</code> грн\n` +
-                `🏦 Заощаджено: <code>${m.savings.toFixed(2)}</code> грн\n` +
-                `⚠️ Мій борг: <code>${m.myDebt.toFixed(2)}</code> грн\n\n` +
-                `🏆 <b>ТОП-3 ПОЖИРАЧІ:</b>\n${top3Text}\n` +
-                `🗣 <b>ВЕРДИКТ АУДИТОРА:</b>\n<i>"${escapeHtml(audit.verdict)}"</i>\n\n` +
-                `🧨 <b>ПРОЖАРКА:</b>\n${escapeHtml(audit.roast_section)}\n\n` +
-                `🤝 <b>ЩО ХОРОШОГО:</b>\n${escapeHtml(audit.praise_section)}\n\n` +
-                `📝 <b>ПЛАН ДІЙ НА НАСТУПНИЙ МІСЯЦЬ:</b>\n${actionPlanText}\n` +
-                `🤖 <i>Аудит згенеровано через: ${aiResult.provider}</i>`;
-        } else {
-            responseMessage = 
-                `📊 <b>ЗВІТ ЗА МІСЯЦЬ (СУХІ ЦИФРИ)</b>\n` +
-                `━━━━━━━━━━━━━━━━━━━\n\n` +
-                `🟢 Доходи: <code>${m.income.toFixed(2)}</code> грн\n` +
-                `🔴 Витрати: <code>${m.expense.toFixed(2)}</code> грн\n` +
-                `${deltaIcon} Дельта: <code>${m.delta.toFixed(2)}</code> грн\n` +
-                `💰 Загальний капітал: <code>${m.totalCapital.toFixed(2)}</code> грн\n` +
-                `⚠️ Борг: <code>${m.myDebt.toFixed(2)}</code> грн\n\n` +
-                `🏆 <b>ТОП-3 ПОЖИРАЧІ:</b>\n${top3Text}\n` +
-                `⚠️ <i>AI-Аудитор тимчасово недоступний, але цифри пораховано точно.</i>`;
-        }
-
-        await ctx.telegram.deleteMessage(ctx.chat.id, loadingMsg.message_id);
-        return await ctx.replyWithHTML(responseMessage);
-
-    } catch (e) {
-        console.error('💥 Помилка виконання /monthly:', e);
-        await ctx.telegram.deleteMessage(ctx.chat.id, loadingMsg.message_id).catch(() => {});
-        return await ctx.reply('❌ Сталася помилка під час формування місячного аудиту.');
-    }
-});
