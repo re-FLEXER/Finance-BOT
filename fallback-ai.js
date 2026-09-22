@@ -17,7 +17,7 @@ async function generateTextWithFallback(prompt) {
         rawText = result.response.text();
         providerName = 'Gemini (3.5 Flash)';
     } catch (geminiErr) {
-        console.warn('⚠️ Gemini API відмовив (503/Error). Перемикаю на Groq...', geminiErr.message);
+        console.warn('⚠️ Gemini API відмовив. Перемикаю на Groq (GPT-OSS-120B)...', geminiErr.message);
         
         // 2. Спроба через Groq (Резервний канал)
         try {
@@ -25,22 +25,22 @@ async function generateTextWithFallback(prompt) {
                 messages: [
                     { 
                         role: 'system', 
-                        content: 'You are a JSON extractor. Output ONLY valid JSON object/array without any markdown, introductory or explanation text.' 
+                        content: 'You are a JSON extractor for a Ukrainian financial bot. ALL category names MUST be strictly in UKRAINIAN language (e.g. "Продукти", "Алкоголь", "Гігієна", "Підписки"). NEVER output English words for categories. Output ONLY valid JSON.' 
                     },
                     { role: 'user', content: prompt }
                 ],
-                model: 'groq/compound',
+                model: 'openai/gpt-oss-120b',
             });
 
             rawText = chatCompletion.choices[0]?.message?.content || '';
-            providerName = 'Groq (Compound)';
+            providerName = 'Groq (GPT-OSS-120B)';
         } catch (groqErr) {
             console.error('❌ Groq API також відмовив:', groqErr.message);
             throw new Error('ALL_AI_PROVIDERS_DOWN', { cause: groqErr });
         }
     }
 
-    // 🛡 САНІТАР-ПАРСЕР: Витягаємо чисто {...} та захищаємо JSON.parse від базікання AI
+    // 🛡 САНІТАР-ПАРСЕР
     let cleanedText = rawText.trim()
         .replace(/```json/gi, '')
         .replace(/```/g, '');
@@ -58,9 +58,6 @@ async function generateTextWithFallback(prompt) {
     };
 }
 
-/**
- * Повторні спроби (Retry/Pending queue) для Cron та важливих запитів
- */
 async function generateTextWithRetry(prompt, maxRetries = 5, delayMs = 12000) {
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
@@ -68,7 +65,7 @@ async function generateTextWithRetry(prompt, maxRetries = 5, delayMs = 12000) {
             const result = await generateTextWithFallback(prompt);
             return result;
         } catch (err) {
-            console.warn(`⏳ Усі AI провайдери недоступні (${err.message}). Очікування ${delayMs / 1000} сек перед спробою ${attempt + 1}...`);
+            console.warn(`⏳ Усі AI провайдери недоступні (${err.message}). Очікування ${delayMs / 1000} сек...`);
             if (attempt === maxRetries) {
                 throw new Error(`Не вдалося отримати відповідь від AI після ${maxRetries} спроб.`, { cause: err });
             }

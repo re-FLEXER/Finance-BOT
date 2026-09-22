@@ -1017,6 +1017,9 @@ app.post('/monobank', async (req, res) => {
     }
 
     try {
+        // 🔄 Смарт-реконнект: відновлюємо з'єднання з пулом Supabase у разі таймауту (фікс помилки P1001)
+        await prisma.$connect().catch(() => {});
+
         const existingTx = await prisma.transaction.findFirst({ where: { monoId: monoId } });
         if (existingTx) return;
 
