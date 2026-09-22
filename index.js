@@ -522,6 +522,8 @@ bot.command('add', async (ctx) => {
     try {
         const prompt = `Проаналізуй фінансову витрату користувача: "${description}", сума: ${amount}.
 
+ВИМОГА ДО МОВИ: category ПОВИННА БУТИ СУВОРО УКРАЇНСЬКОЮ МОВОЮ (наприклад: "Продукти", "Алкоголь", "Гігієна", "Ресторани", "Сервіс"). ЖОДНИХ АНГЛІЙСЬКИХ СЛІВ!
+
 Визнач type ("expense", "income", "saving"), category (коротко 1-2 слова) та workspace ("Особисте" або "Проєкт").
 Формат JSON: {"type": "expense", "category": "...", "workspace": "..."}`;
 
@@ -824,6 +826,8 @@ bot.on('text', async (ctx) => {
             const prompt = `Проаналізуй фінансову транзакцію. 
 Користувач написав / Опис транзакції: "${userText}".
 
+ВИМОГА ДО МОВИ: category ПОВИННА БУТИ СУВОРО УКРАЇНСЬКОЮ МОВОЮ (наприклад: "Алкоголь", "Гігієна", "Продукти", "Ресторани", "Сервіс"). ЖОДНИХ АНГЛІЙСЬКИХ СЛІВ!
+
 ТИ ПОВИНЕН ОБРАТИ TYPE ТІЛЬКИ З ЦЬОГО СПИСКУ ЗА СУВОРИМИ ПРАВИЛАМИ:
 1. Переміщення активів -> type: "saving" або "transfer".
 2. Справжні витрати -> type: "expense".
@@ -1017,11 +1021,11 @@ app.post('/monobank', async (req, res) => {
     }
 
     try {
-        // 🔄 Смарт-реконнект: відновлюємо з'єднання з пулом Supabase у разі таймауту (фікс помилки P1001)
-        await prisma.$connect().catch(() => {});
+    // 🔄 Смарт-реконнект: відновлюємо з'єднання з пулом Supabase у разі таймауту (фікс P1001)
+    await prisma.$connect().catch(() => {});
 
-        const existingTx = await prisma.transaction.findFirst({ where: { monoId: monoId } });
-        if (existingTx) return;
+    const existingTx = await prisma.transaction.findFirst({ where: { monoId: monoId } });
+    if (existingTx) return;
 
         // 🛑 ЗАЛІЗОБЕТОННИЙ ФІЛЬТР: Ігноруємо парне зарахування (+) на Банку/депозит
         const lowerDesc = description.toLowerCase();
@@ -1091,6 +1095,8 @@ app.post('/monobank', async (req, res) => {
         try {
             const prompt = `Проаналізуй фінансову транзакцію. 
 Опис: "${description}". Сума: ${amount}. Зарахування: ${isIncome}.
+
+ВИМОГА ДО МОВИ: category ПОВИННА БУТИ СУВОРО УКРАЇНСЬКОЮ МОВОЮ (наприклад: "Продукти", "Алкоголь", "Гігієна", "Ресторани", "Сервіс"). ЖОДНИХ АНГЛІЙСЬКИХ СЛІВ!
 
 ТИ ПОВИНЕН ОБРАТИ TYPE ТІЛЬКИ З ЦЬОГО СПИСКУ ЗА СУВОРИМИ ПРАВИЛАМИ:
 1. Переміщення активів -> type: "saving" або "transfer" (Якщо опис містить "банка", "депозит", "накопичення" чи "з чорної картки" при поповненні банки — СТАКАТИ "saving").
@@ -1445,6 +1451,8 @@ async function classifyUserIntent(userText) {
     const prompt = `Ти — розумний класифікатор намірів для фінансового бота.
 Проаналізуй текст користувача: "${userText}".
 
+ВИМОГА ДО МОВИ: category ДЛЯ ВСІХ ТРАНЗАКЦІЙ ПОВИННА БУТИ СУВОРО УКРАЇНСЬКОЮ МОВОЮ (наприклад: "Продукти", "Кава", "Транспорт", "Погашення боргу"). ЖОДНИХ АНГЛІЙСЬКИХ СЛІВ!
+
 Твоє завдання — визначити intent (TRANSACTION, SYNC, CHAT).
 
 ВАРІАНТИ INTENT:
@@ -1459,7 +1467,7 @@ async function classifyUserIntent(userText) {
 - type: "expense" | "income" | "transfer" | "saving" | "i_owe" | "owe_me" | "pay_debt" | "get_debt"
 - source: "card" | "cash"
 - toSource: "card" | "cash" | null
-- category: коротка категорія (1-2 слова)
+- category: коротка категорія (1-2 слова українською мовою)
 - workspace: "Особисте" або "Проєкт"
 - description: короткий опис конкретно цієї дії
 
