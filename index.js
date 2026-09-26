@@ -500,6 +500,74 @@ bot.command('undo', async (ctx) => {
     }
 });
 
+// 3.1. КОМАНДИ АКТИВВАЦІЇ ТА ДЕАКТИВАЦІЇ AI-РАДНИКА
+// Допоміжна функція для виходу з режиму порадника
+async function exitAdviceMode(ctx, isTimeout = false) {
+    const userId = ctx.from.id;
+    if (userStates[userId]) {
+        delete userStates[userId].isAdviceMode;
+        delete userStates[userId].lastActive;
+    }
+
+    const msg = isTimeout 
+        ? '⏳ <b>Сесію порадника завершено через неактивність (20 хв).</b>\n━━━━━━━━━━━━━━━━━━━\n📊 Бот повернувся в режим аналітики. Нові повідомлення фіксуватимуться як транзакції.'
+        : '📊 <b>РЕЖИМ АНАЛІТИКА ПОВЕРНЕНО</b>\n━━━━━━━━━━━━━━━━━━━\n<i>Консультацію завершено. Готовий до фіксації нових чеків та витрат!</i>';
+
+    await ctx.replyWithHTML(msg);
+}
+
+// Вхід у режим порадника (/advice, /advisor, /ask)
+bot.command(['advice', 'advisor', 'ask'], async (ctx) => {
+    const userId = ctx.from.id;
+    
+    // Вмикаємо режим порадника
+    userStates[userId] = {
+        isAdviceMode: true,
+        lastActive: Date.now()
+    };
+
+    const welcomeMsg = 
+`🎩 <b>РЕЖИМ AI-РАДНИКА АКТИВОВАНО</b>
+━━━━━━━━━━━━━━━━━━━
+<i>Я уважно слухаю. Усі ваші повідомлення сприймаються як обговорення, планування та запитання.</i>
+
+💡 <b>Транзакції в базу не записуються.</b>
+⏳ <i>Сесія автоматично закриється після 20 хвилин паузи.</i>
+
+Опишіть вашу ситуацію або поставте запитання:`;
+
+    await ctx.replyWithHTML(welcomeMsg, Markup.inlineKeyboard([
+        [Markup.button.callback('🎁 Планування покупки', 'prompt_plan')],
+        [Markup.button.callback('🤝 Стратегія боргів', 'prompt_debts')],
+        [Markup.button.callback('📊 Оцінка витрати', 'prompt_eval')],
+        [Markup.button.callback('🛑 Завершити консультацію', 'exit_advice')]
+    ]));
+});
+
+// Вихід з режиму порадника (/endadvice, /exit, /stop, /off)
+bot.command(['endadvice', 'exit', 'stop', 'off'], async (ctx) => {
+    await exitAdviceMode(ctx, false);
+});
+
+// Обробка натискання кнопки "🛑 Завершити консультацію"
+bot.action('exit_advice', async (ctx) => {
+    await ctx.answerCbQuery();
+    await exitAdviceMode(ctx, false);
+});
+
+// Обробка натискань на Quick Prompts
+bot.action(/^prompt_(plan|debts|eval)$/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const type = ctx.match[1];
+    
+    let promptText = '';
+    if (type === 'plan') promptText = 'Хотів би порадитися щодо великої покупки: ';
+    if (type === 'debts') promptText = 'Як мені оптимальніше закрити поточні борги?';
+    if (type === 'eval') promptText = 'Оціни, чи доречна зараз ця витрата: ';
+
+    await ctx.reply(`✍️ ${promptText}`);
+});
+
 // --- РУЧНЕ ДОДАВАННЯ ТРАНЗАКЦІЇ /add ---
 bot.command('add', async (ctx) => {
     const userId = ctx.from.id;
@@ -777,6 +845,70 @@ bot.command('export', async (ctx) => {
     }
 });
 
+// --- ХЕНДЛЕР СПІЛКУВАННЯ З AI-РАДНИКОМ (Таска 3.2) ---
+async function handleAdvisorChat(ctx, userText) {
+    const userId = ctx.from.id;
+    const waitMsg = await ctx.reply('⏳ Аналізую ваші фінанси...');
+
+    try {
+        const stats = await getStatsData();
+        let rawHistory = await getChatHistory(userId);
+        let history = Array.isArray(rawHistory) ? rawHistory : [];
+
+        // Перевірка: масив має починатися з 'user' для Gemini SDK
+        while (history.length > 0 && history[0].role !== 'user') {
+            history.shift();
+        }
+
+        const systemInstruction = `
+Ти — фінансовий ментор та аналітик.
+Поточний стан користувача:
+- Вільні кошти (Картка): ${stats.personalBalance} грн.
+- Загальний капітал: ${stats.totalCapital} грн.
+- Збереження (Кеш/Банки): ${stats.pSaving} грн.
+- Активні борги користувача (він винен): ${stats.currentIOwe} грн.
+- Йому винні: ${stats.currentOweMe} грн.
+
+Правила відповідей:
+1. Відповідай коротко, лаконічно, дружньо та по суті.
+2. Враховуй попередній контекст діалогу.
+3. Якщо користувач хоче зробити витрату, але має борги чи малий баланс — підсвіти це як ризик.
+`;
+
+        const advisorModel = genAI.getGenerativeModel({ 
+            model: "gemini-3.5-flash",
+            systemInstruction: systemInstruction 
+        });
+
+        const chat = advisorModel.startChat({ history });
+
+        let adviceResult;
+        try {
+            adviceResult = await chat.sendMessage(userText);
+        } catch (err) {
+            console.warn('Первинний запит не вдався, робимо повтор...', err);
+            await new Promise(res => setTimeout(res, 1000));
+            adviceResult = await chat.sendMessage(userText);
+        }
+
+        let safeResponse = cleanAiResponse(adviceResult.response.text())
+            .replace(/<h[1-6]>/g, '<b>')
+            .replace(/<\/h[1-6]>/g, '</b>\n')
+            .replace(/\*/g, '');
+
+        await ctx.telegram.deleteMessage(ctx.chat.id, waitMsg.message_id);
+        await ctx.replyWithHTML(`🎩 <b>ТВІЙ РАДНИК:</b>\n\n${safeResponse}`);
+
+        await saveChatMessage(userId, 'user', userText);
+        await saveChatMessage(userId, 'model', safeResponse);
+
+    } catch (err) {
+        console.error('❌ Помилка в блоці AI Радника:', err);
+        await ctx.telegram.deleteMessage(ctx.chat.id, waitMsg.message_id).catch(() => {});
+        await ctx.reply('Вибач, сталася помилка при аналізі фінансів ШІ.');
+    }
+}
+
 // --- ОБРОБКА ТЕКСТОВИХ ПОВІДОМЛЕНЬ ТА РАДНИКА AI З ПАМ'ЯТЮ ---
 bot.on('text', async (ctx) => {
     const userId = ctx.from.id;
@@ -786,6 +918,31 @@ bot.on('text', async (ctx) => {
     if (userText.startsWith('/')) {
         delete userStates[userId];
         return;
+    }
+
+    // 🌟 3.3. РЕЖИМ AI-РАДНИКА + АВТО-ТАЙМАУТ (20 хвилин)
+    if (userStates[userId]?.isAdviceMode) {
+        const lowerText = userText.trim().toLowerCase();
+
+        // 1. Перевірка на текстові закриття з таски 3.1
+        if (['дякую', 'все', 'дякую за допомогу', 'спасибі', 'все дякую'].includes(lowerText)) {
+            return await exitAdviceMode(ctx, false);
+        }
+
+        // 2. Перевірка таймауту неактивності (20 хвилин)
+        const now = Date.now();
+        const idleTime = now - userStates[userId].lastActive;
+        const TIMEOUT_MS = 20 * 60 * 1000; // 20 хвилин у мілісекундах
+
+        if (idleTime > TIMEOUT_MS) {
+            // Скидаємо стан і сповіщаємо про авто-вихід через таймаут
+            await exitAdviceMode(ctx, true);
+            // ⚠️ Тут НЕМАЄ return — виконання йде далі в розпізнавач транзакцій!
+        } else {
+            // Якщо таймаут не минув — оновлюємо час і йдемо в радник
+            userStates[userId].lastActive = now;
+            return await handleAdvisorChat(ctx, userText);
+        }
     }
 
     // 1. СТАН: Підтвердження скидання даних (2FA Reset)
@@ -988,7 +1145,12 @@ bot.on('text', async (ctx) => {
             .replace(/\*/g, '');
 
         await ctx.telegram.deleteMessage(ctx.chat.id, waitMsg.message_id);
-        await ctx.replyWithHTML(`🎩 <b>ТВІЙ РАДНИК:</b>\n\n${safeResponse}`);
+
+        // 🌟 Добавляем Inline-кнопку "Завершить консультацию" под сообщением
+        await ctx.replyWithHTML(
+            `🎩 <b>ТВІЙ РАДНИК:</b>\n\n${safeResponse}`,
+        Markup.inlineKeyboard([[Markup.button.callback('🛑 Завершити консультацію', 'exit_advice')]])
+        );
 
         await saveChatMessage(userId, 'user', userText);
         await saveChatMessage(userId, 'model', safeResponse);
@@ -1389,6 +1551,7 @@ app.listen(PORT, async () => {
             { command: 'stats', description: '📊 Фінансова статистика' },
             { command: 'sync', description: '🔄 Синхронізувати баланс з карткою' },
             { command: 'undo', description: '🔄 Скасувати останню операцію (Ctrl+Z)' },
+            { command: 'advice', description: '🎩 Режим AI-Радника (планування та поради)' },
             { command: 'monthly', description: '🔥 Глибокий AI-аудит за місяць' },
             { command: 'export', description: '📥 Експорт транзакцій у CSV (Excel)' },
             { command: 'setsavings', description: '🟡 Встановити суму збережень' },
