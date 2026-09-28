@@ -22,6 +22,9 @@ const report = {
 };
 const securityOnly = process.argv.includes('--security-only');
 
+// Хелпер для паузи між людськими запитами (щоб дати API час "видихнути")
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 function escapeHtml(text) {
     if (!text) return '';
     return String(text)
@@ -82,85 +85,117 @@ async function main() {
     // ----------------------------------------------------
     // 🗄️ 1. СТРЕС-ТЕСТ БАЗИ ДАНИХ ТА З'ЄДНАННЯ (PRISMA)
     // ----------------------------------------------------
-    console.log('🗄️ [SECTION 1] БАЗА ДАНИХ (DATABASE & PRISMA LOAD)');
-    
-    await runTestBlock('DB', 'Підключення до Supabase/PostgreSQL', async () => {
-        await prisma.$queryRaw`SELECT 1`;
-        return true;
-    });
+    if (!securityOnly) {
+        console.log('🗄️ [SECTION 1] БАЗА ДАНИХ (DATABASE & PRISMA LOAD)');
+        
+        await runTestBlock('DB', 'Підключення до Supabase/PostgreSQL', async () => {
+            await prisma.$queryRaw`SELECT 1`;
+            return true;
+        });
 
-    await runTestBlock('DB', 'Паралельне читання (10 одночасних запитів)', async () => {
-        const promises = Array.from({ length: 10 }).map(() => prisma.transaction.findMany({ take: 5 }));
-        await Promise.all(promises);
-        return true;
-    });
+        await runTestBlock('DB', 'Паралельне читання (10 одночасних запитів)', async () => {
+            const promises = Array.from({ length: 10 }).map(() => prisma.transaction.findMany({ take: 5 }));
+            await Promise.all(promises);
+            return true;
+        });
+    }
 
     // ----------------------------------------------------
     // 🧠 2. ПЕРЕВІРКА ТА СТРЕС-ТЕСТ NEURAL NETWORKS (AI PROVIDERS)
     // ----------------------------------------------------
-    console.log('\n🧠 [SECTION 2] НЕЙРОМЕРЕЖІ (AI PROVIDERS STRESS & LATENCY)');
+    if (!securityOnly) {
+        console.log('\n🧠 [SECTION 2] НЕЙРОМЕРЕЖІ (AI PROVIDERS STRESS & LATENCY)');
 
-    // --- Google Gemini API ---
-    const geminiKey = process.env.GEMINI_API_KEY;
-    if (geminiKey) {
-        const geminiModel = 'gemini-3.5-flash';
+        // --- Google Gemini API ---
+        const geminiKey = process.env.GEMINI_API_KEY;
+        if (geminiKey) {
+            const geminiModel = 'gemini-3.8-flash';
 
-        // 1. Health Check (Базова доступність)
-        await runTestBlock('AI', `Google Gemini (${geminiModel}): 🟢 Health Check (Базовий ping)`, async () => {
-            const genAI = new GoogleGenerativeAI(geminiKey);
-            const model = genAI.getGenerativeModel({ model: geminiModel });
-            const result = await model.generateContent('Скажи "OK"');
-            return result.response.text().length > 0;
-        });
+            console.log(`\n  🔹 Google Gemini (${geminiModel}):`);
 
-        // 2. Стрес промпт (3000+ символів)
-        await runTestBlock('AI', `Google Gemini (${geminiModel}): 🔥 Стрес-промпт (3000+ символів)`, async () => {
-            const genAI = new GoogleGenerativeAI(geminiKey);
-            const model = genAI.getGenerativeModel({ model: geminiModel });
-            const prompt = 'Проаналізуй витрати: ' + 'Купив каву за 60 грн. '.repeat(150);
-            const result = await model.generateContent(prompt);
-            return result.response.text().length > 0;
-        });
-
-        // 3. Concurrency Stress (3 паралельні запити)
-        await runTestBlock('AI', `Google Gemini (${geminiModel}): ⚡ Паралельне навантаження (3 запити одночасно)`, async () => {
-            const genAI = new GoogleGenerativeAI(geminiKey);
-            const model = genAI.getGenerativeModel({ model: geminiModel });
-            const promises = Array.from({ length: 3 }).map(() => model.generateContent('Коротко: статус проекту'));
-            const results = await Promise.all(promises);
-            return results.every(res => res.response.text().length > 0);
-        });
-    } else {
-        console.log('  ⚠️ [SKIP] GEMINI_API_KEY не знайдено в .env');
-    }
-
-    // --- Groq API ---
-    const groqKey = process.env.GROQ_API_KEY;
-    if (groqKey) {
-        const groqModel = 'openai/gpt-oss-120b';
-
-        // 1. Health Check (Базова доступність)
-        await runTestBlock('AI', `Groq API (${groqModel}): 🟢 Health Check (Базовий ping)`, async () => {
-            const groq = new Groq({ apiKey: groqKey });
-            const chatCompletion = await groq.chat.completions.create({
-                messages: [{ role: 'user', content: 'Say OK' }],
-                model: groqModel,
+            // 1. Людське навантаження (Simulated Telegram Chat Input)
+            await runTestBlock('AI', `  💬 Рівень 1: Коротке людське повідомлення ("Кава 60 грн")`, async () => {
+                const genAI = new GoogleGenerativeAI(geminiKey);
+                const model = genAI.getGenerativeModel({ model: geminiModel });
+                const result = await model.generateContent('Проаналізуй витрату: Кава 60 грн. Визнач категорію.');
+                return result.response.text().length > 0;
             });
-            return chatCompletion.choices[0]?.message?.content.length > 0;
-        });
 
-        // 2. Стрес промпт
-        await runTestBlock('AI', `Groq API (${groqModel}): 🔥 Стрес-промпт (3000+ символів)`, async () => {
-            const groq = new Groq({ apiKey: groqKey });
-            const prompt = 'Проаналізуй витрати: ' + 'Купив каву за 60 грн. '.repeat(150);
-            const chatCompletion = await groq.chat.completions.create({
-                messages: [{ role: 'user', content: prompt }],
-                model: groqModel,
+            await delay(1500); // Природна пауза між повідомленнями користувача
+
+            await runTestBlock('AI', `  💬 Рівень 1: Запитання в режим Порадника ("Порадиш як зекономити?")`, async () => {
+                const genAI = new GoogleGenerativeAI(geminiKey);
+                const model = genAI.getGenerativeModel({ model: geminiModel });
+                const result = await model.generateContent('Коротко дай 1 пораду: як зменшити дрібні щоденні витрати?');
+                return result.response.text().length > 0;
             });
-            return chatCompletion.choices[0]?.message?.content.length > 0;
-        });
-    } else {
-        console.log('  ⚠️ [SKIP] GROQ_API_KEY не знайдено в .env');
+
+            await delay(1500);
+
+            // 2. Помірне навантаження (Multi-Transaction)
+            await runTestBlock('AI', `  🟡 Рівень 2: Помірний розбір чеку (3 витрати в одному тексті)`, async () => {
+                const genAI = new GoogleGenerativeAI(geminiKey);
+                const model = genAI.getGenerativeModel({ model: geminiModel });
+                const prompt = 'Розбий на транзакції: "Купив продукти 450 грн, заправив авто 1200 грн і взяв каву 60 грн"';
+                const result = await model.generateContent(prompt);
+                return result.response.text().length > 0;
+            });
+
+            await delay(1500);
+
+            // 3. Навантажувальний стрес-тест (3000+ символів)
+            await runTestBlock('AI', `  🔥 Рівень 3: Стрес-промпт (3000+ символів аналітики)`, async () => {
+                const genAI = new GoogleGenerativeAI(geminiKey);
+                const model = genAI.getGenerativeModel({ model: geminiModel });
+                const prompt = 'Проаналізуй сукупні витрати за місяць: ' + 'Купив каву за 60 грн. '.repeat(150);
+                const result = await model.generateContent(prompt);
+                return result.response.text().length > 0;
+            });
+
+            // 4. Паралельне навантаження (Concurrency)
+            await runTestBlock('AI', `  ⚡ Рівень 3: Паралельний спам (3 одночасні запити)`, async () => {
+                const genAI = new GoogleGenerativeAI(geminiKey);
+                const model = genAI.getGenerativeModel({ model: geminiModel });
+                const promises = Array.from({ length: 3 }).map(() => model.generateContent('Статус проекту: коротко 1 слово.'));
+                const results = await Promise.all(promises);
+                return results.every(res => res.response.text().length > 0);
+            });
+        } else {
+            console.log('  ⚠️ [SKIP] GEMINI_API_KEY не знайдено в .env');
+        }
+
+        // --- Groq API ---
+        const groqKey = process.env.GROQ_API_KEY;
+        if (groqKey) {
+            const groqModel = 'openai/gpt-oss-120b';
+
+            console.log(`\n  🔹 Groq API (${groqModel}):`);
+
+            // 1. Людське навантаження
+            await runTestBlock('AI', `  💬 Рівень 1: Коротке людське повідомлення ("Кава 60 грн")`, async () => {
+                const groq = new Groq({ apiKey: groqKey });
+                const chatCompletion = await groq.chat.completions.create({
+                    messages: [{ role: 'user', content: 'Кава 60 грн' }],
+                    model: groqModel,
+                });
+                return chatCompletion.choices[0]?.message?.content.length > 0;
+            });
+
+            await delay(1000);
+
+            // 2. Стрес промпт (3000+ символів)
+            await runTestBlock('AI', `  🔥 Рівень 3: Стрес-промпт (3000+ символів аналітики)`, async () => {
+                const groq = new Groq({ apiKey: groqKey });
+                const prompt = 'Проаналізуй витрати за місяць: ' + 'Купив каву за 60 грн. '.repeat(150);
+                const chatCompletion = await groq.chat.completions.create({
+                    messages: [{ role: 'user', content: prompt }],
+                    model: groqModel,
+                });
+                return chatCompletion.choices[0]?.message?.content.length > 0;
+            });
+        } else {
+            console.log('  ⚠️ [SKIP] GROQ_API_KEY не знайдено в .env');
+        }
     }
 
     // ----------------------------------------------------
