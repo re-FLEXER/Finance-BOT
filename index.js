@@ -16,9 +16,12 @@ app.use(express.json());
 const prisma = new PrismaClient();
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
+// Map для збереження часу останнього алерта від користувача (userId -> timestamp)
+const alertCooldowns = new Map();
+
 // --- MIDDLEWARE: ЖОРСТКИЙ WHITELIST ТА АЛЕРТ ---
 bot.use(async (ctx, next) => {
-   // ✅ НОВИЙ КОД (ПРОПУСКАЄ І ТЕКСТ, І КНОПКИ):
+    // ✅ ПРОПУСКАЄ І ТЕКСТ, І КНОПКИ:
     if (!ctx.message && !ctx.callbackQuery) {
         return;
     }
@@ -26,23 +29,31 @@ bot.use(async (ctx, next) => {
     const allowedUserId = Number(process.env.MY_CHAT_ID);
     const userId = ctx.from?.id;
 
-    // 2. Якщо це я пропускаємо - далі
+    // 2. Якщо це я — пропускаємо далі
     if (userId === allowedUserId) {
         return next();
     }
 
-    // 3. Збираємо дані про unavtorized user для мого сповіщення
-    const firstName = ctx.from?.first_name || 'Без імені';
-    const lastName = ctx.from?.last_name || '';
-    const username = ctx.from?.username ? `@${ctx.from.username}` : 'немає юзернейму';
-    const isPremium = ctx.from?.is_premium ? '⭐ Telegram Premium' : 'Звичайний акаунт';
-    const lang = ctx.from?.language_code || 'невідомо';
-    const textSent = ctx.message?.text || '[медіа/команда]';
+    // 🛑 3. RATE-LIMITING (Захист від спаму алерตами)
+    const nowTimestamp = Date.now();
+    const COOLDOWN_MS = 60 * 1000; // 1 хвилина
+    const lastAlertTime = alertCooldowns.get(userId) || 0;
 
-    const now = new Date().toLocaleString('uk-UA', { timeZone: 'Europe/Kyiv'});
+    // Якщо від цього юзера вже надходив алерт протягом останньої хвилини — надсилаємо сповіщення адміну лише раз
+    if (nowTimestamp - lastAlertTime >= COOLDOWN_MS) {
+        alertCooldowns.set(userId, nowTimestamp);
 
-    // FULL досьє для мене
-    const alertMsg = 
+        // 🧹 4. САНІТАРИЗАЦІЯ ДАНИХ (Захист від HTML-ін'єкції)
+        const firstName = escapeHtml(ctx.from?.first_name || 'Без імені');
+        const lastName = escapeHtml(ctx.from?.last_name || '');
+        const username = ctx.from?.username ? `@${escapeHtml(ctx.from.username)}` : 'немає юзернейму';
+        const isPremium = ctx.from?.is_premium ? '⭐ Telegram Premium' : 'Звичайний акаунт';
+        const lang = escapeHtml(ctx.from?.language_code || 'невідомо');
+        const textSent = escapeHtml(ctx.message?.text || '[медіа/команда]');
+        const now = new Date().toLocaleString('uk-UA', { timeZone: 'Europe/Kyiv'});
+
+        // FULL досьє для адміна
+        const alertMsg = 
 `🚨 <b>!IMPORTANT! Несанкціонований вхід — відхилено</b>
 
 👤 <b>Користувач:</b> ${firstName} ${lastName} (${username})
@@ -54,13 +65,16 @@ bot.use(async (ctx, next) => {
 
 🔗 <a href="tg://user?id=${userId}">Переглянути профіль користувача</a>`;
 
-    try {
-        await bot.telegram.sendMessage(allowedUserId, alertMsg, { parse_mode: 'HTML'});
-    } catch (e) {
-        console.error('Помилка відправки алерту про Unavtorized User', e);
+        try {
+            await bot.telegram.sendMessage(allowedUserId, alertMsg, { parse_mode: 'HTML'});
+        } catch (e) {
+            console.error('Помилка відправки алерту про Unavtorized User', e);
+        }
+    } else {
+        console.warn(`⏳ Алерт від несанкціонованого юзера ${userId} проігноровано (cooldown 1 хв).`);
     }
 
-    // 3. Екран відмови для Unavtorized User
+    // 5. Екран відмови для Unavtorized User
     const rejectMsg = 
 `🛑 <b>TERMINAL ACCESS RESTRICTED</b>
 ━━━━━━━━━━━━━━━━━━━
@@ -76,7 +90,7 @@ bot.use(async (ctx, next) => {
 🛡 <i>Ваші ідентифікатори передані адміністратору. Термінал заблоковано. Подальші спроби будуть розцінені як пряма атака.</i>`;
 
     return ctx.replyWithHTML(rejectMsg);
-}) 
+});
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const userStates = {};
@@ -110,10 +124,10 @@ function generateProgressBar(current, total, length = 10) {
 // 🧹 Хелпер для очистки відповідей Gemini від Markdown-артефактів
 function cleanAiResponse(text) {
     if (!text) return '';
-    return text
+    return escapeHtml(text)
         .replace(/\*\*(.*?)\*\*/g, '<b>$1</b>')  // Замінюємо **жирний** на <b>
         .replace(/\*(.*?)\*/g, '<i>$1</i>')      // Замінюємо *курсив* на <i>
-        .replace(/`/g, '');                      // Прибираємо бeктіки
+        .replace(/`/g, '');                      // Прибираємо бектіки
 }
 
 // --- ТЕЛЕГРАМ ВЕБХУК НАЛАШТУВАННЯ ---
@@ -876,7 +890,7 @@ async function handleAdvisorChat(ctx, userText) {
 `;
 
         const advisorModel = genAI.getGenerativeModel({ 
-            model: "gemini-3.5-flash",
+            model: "gemini-3.8-flash",
             systemInstruction: systemInstruction 
         });
 
@@ -891,13 +905,15 @@ async function handleAdvisorChat(ctx, userText) {
             adviceResult = await chat.sendMessage(userText);
         }
 
-        let safeResponse = cleanAiResponse(adviceResult.response.text())
-            .replace(/<h[1-6]>/g, '<b>')
-            .replace(/<\/h[1-6]>/g, '</b>\n')
-            .replace(/\*/g, '');
+        // Безпечно обробляємо відповідь
+        let safeResponse = cleanAiResponse(adviceResult.response.text());
 
         await ctx.telegram.deleteMessage(ctx.chat.id, waitMsg.message_id);
-        await ctx.replyWithHTML(`🎩 <b>ТВІЙ РАДНИК:</b>\n\n${safeResponse}`);
+        
+        await ctx.replyWithHTML(
+            `🎩 <b>ТВІЙ РАДНИК:</b>\n\n${safeResponse}`,
+            Markup.inlineKeyboard([[Markup.button.callback('🛑 Завершити консультацію', 'exit_advice')]])
+        );
 
         await saveChatMessage(userId, 'user', userText);
         await saveChatMessage(userId, 'model', safeResponse);
@@ -920,11 +936,11 @@ bot.on('text', async (ctx) => {
         return;
     }
 
-    // 🌟 3.3. РЕЖИМ AI-РАДНИКА + АВТО-ТАЙМАУТ (20 хвилин)
+    // 🌟 1. РЕЖИМ AI-РАДНИКА + АВТО-ТАЙМАУТ (20 хвилин)
     if (userStates[userId]?.isAdviceMode) {
         const lowerText = userText.trim().toLowerCase();
 
-        // 1. Перевірка на текстові закриття з таски 3.1
+        // 1. Перевірка на текстові закриття
         if (['дякую', 'все', 'дякую за допомогу', 'спасибі', 'все дякую'].includes(lowerText)) {
             return await exitAdviceMode(ctx, false);
         }
@@ -937,7 +953,7 @@ bot.on('text', async (ctx) => {
         if (idleTime > TIMEOUT_MS) {
             // Скидаємо стан і сповіщаємо про авто-вихід через таймаут
             await exitAdviceMode(ctx, true);
-            // ⚠️ Тут НЕМАЄ return — виконання йде далі в розпізнавач транзакцій!
+            // Виконання йде далі в розпізнавач транзакцій
         } else {
             // Якщо таймаут не минув — оновлюємо час і йдемо в радник
             userStates[userId].lastActive = now;
@@ -945,7 +961,7 @@ bot.on('text', async (ctx) => {
         }
     }
 
-    // 1. СТАН: Підтвердження скидання даних (2FA Reset)
+    // 2. СТАН: Підтвердження скидання даних (2FA Reset)
     if (userStates[userId] && userStates[userId].awaitingResetConfirm) {
         if (userText.trim() === 'ОЧИСТИТИ ДАНІ') {
             delete userStates[userId];
@@ -972,7 +988,7 @@ bot.on('text', async (ctx) => {
         }
     }
 
-    // 2. СТАН: Режим "Уточнити"
+    // 3. СТАН: Режим "Уточнити"
     if (userStates[userId] && userStates[userId].isEditing) {
         const txId = userStates[userId].txId;
         delete userStates[userId];
@@ -1032,16 +1048,16 @@ bot.on('text', async (ctx) => {
 
     console.log(`📩 Нове повідомлення від ${userId}: "${userText}"`);
 
-    // 3. AI-РОУТЕР: Автоматична перевірка на транзакцію у звичайному тексті
+    // 4. AI-РОУТЕР: Автоматична перевірка на транзакцію у звичайному тексті
     const intentData = await classifyUserIntent(userText);
 
-   // 3.1. Обробка безшовного наміру SYNC
+    // 4.1. Обробка безшовного наміру SYNC
     if (intentData && intentData.intent === 'SYNC' && typeof intentData.amount === 'number') {
         const syncResult = await processBalanceSync(intentData.amount);
         return await ctx.replyWithHTML(syncResult.message);
     }
 
-    // 3.2. Обробка TRANSACTION (одинарні та пакетні Multi-Transaction)
+    // 4.2. Обробка TRANSACTION (одинарні та пакетні Multi-Transaction)
     if (intentData && intentData.isTransaction && Array.isArray(intentData.transactions) && intentData.transactions.length > 0) {
         const batchId = intentData.transactions.length > 1 ? crypto.randomUUID() : null;
         const createdTxList = [];
@@ -1091,84 +1107,26 @@ bot.on('text', async (ctx) => {
         }
     }
 
-    // 4. AI-РАДНИК: Обробка запитань, розмов та фінансових аналізів
-    const waitMsg = await ctx.reply('⏳ Аналізую ваші фінанси...');
-    try {
-        const stats = await getStatsData();
-        
-        let rawHistory = await getChatHistory(userId);
-        let history = Array.isArray(rawHistory) ? rawHistory : [];
-
-        // Перевірка: масив має починатися з 'user' для Gemini SDK
-        while (history.length > 0 && history[0].role !== 'user') {
-            history.shift();
-        }
-
-        console.log(`📜 Завантажено елементів історії для Gemini: ${history.length}`);
-
-        const systemInstruction = `
-Ти — фінансовий ментор та аналітик.
-Поточний стан користувача:
-- Вільні кошти (Картка): ${stats.personalBalance} грн.
-- Загальний капітал: ${stats.totalCapital} грн.
-- Збереження (Кеш/Банки): ${stats.pSaving} грн.
-- Активні борги користувача (він винен): ${stats.currentIOwe} грн.
-- Йому винні: ${stats.currentOweMe} грн.
-
-Правила відповідей:
-1. Відповідай коротко, лаконічно, дружньо та по суті.
-2. Враховуй попередній контекст діалогу.
-3. Якщо користувач хоче зробити витрату, але має борги чи малий баланс — підсвіти це як ризик.
-`;
-
-        const advisorModel = genAI.getGenerativeModel({ 
-            model: "gemini-3.5-flash",
-            systemInstruction: systemInstruction 
-        });
-
-        const chat = advisorModel.startChat({
-            history: history
-        });
-
-        let adviceResult;
-        try {
-            adviceResult = await chat.sendMessage(userText);
-        } catch (err) {
-            console.warn('⚠️ Первинний запит Gemini не вдався, робимо повтор...', err.message);
-            await new Promise(res => setTimeout(res, 1000));
-            adviceResult = await chat.sendMessage(userText);
-        }
-
-        let safeResponse = cleanAiResponse(adviceResult.response.text())
-            .replace(/<h[1-6]>/g, '<b>')
-            .replace(/<\/h[1-6]>/g, '</b>\n')
-            .replace(/\*/g, '');
-
-        await ctx.telegram.deleteMessage(ctx.chat.id, waitMsg.message_id);
-
-        // 🌟 Добавляем Inline-кнопку "Завершить консультацию" под сообщением
-        await ctx.replyWithHTML(
-            `🎩 <b>ТВІЙ РАДНИК:</b>\n\n${safeResponse}`,
-        Markup.inlineKeyboard([[Markup.button.callback('🛑 Завершити консультацію', 'exit_advice')]])
-        );
-
-        await saveChatMessage(userId, 'user', userText);
-        await saveChatMessage(userId, 'model', safeResponse);
-
-        console.log('💾 Запит та відповідь успішно записані в Supabase!');
-    } catch (err) {
-        console.error('❌ Помилка в блоці AI Радника:', err);
-        await ctx.telegram.deleteMessage(ctx.chat.id, waitMsg.message_id);
-        await ctx.reply('Вибач, сталася помилка при аналізі фінансів ШІ.');
-    }
+    // 🌟 5. ЯКЩО МОВА/ПИТАННЯ ТА НАМІР = "CHAT":
+    // Перенаправляємо обробку прямо в єдину функцію AI-Радника!
+    return await handleAdvisorChat(ctx, userText);
 });
 
-// --- ВЕБХУК МОНОБАНКУ (З ЖОРСТКИМ ФІЛЬТРОМ ПАРНИХ БАНК) ---
-app.post('/monobank', async (req, res) => {
-    res.status(200).send('OK'); 
-    
+// --- ВЕБХУК МОНОБАНКУ (З ЖОРСТКИМ ФІЛЬТРОМ ТА АТОМАРНІСТЮ) ---
+app.post('/monobank/:secret', async (req, res) => {
+    // 🛡 ЗАХИСТ: Перевірка секретного токена з URL
+    const incomingSecret = req.params.secret;
+    const expectedSecret = process.env.MONO_SECRET;
+
+    if (!expectedSecret || incomingSecret !== expectedSecret) {
+        console.warn(`🚨 Спроба несанкціонованого виклику /monobank від IP: ${req.ip}`);
+        return res.status(403).send('Forbidden: Invalid Webhook Secret');
+    }
+
     const data = req.body?.data;
-    if (!data || !data.statementItem) return;
+    if (!data || !data.statementItem) {
+        return res.status(200).send('OK'); 
+    }
 
     const item = data.statementItem;
     const amount = Math.abs(item.amount) / 100;
@@ -1179,17 +1137,21 @@ app.post('/monobank', async (req, res) => {
 
     if (monoId && monoId.startsWith('test_')) {
         console.log('🧪 Тестовий вебхук успішно прийнято!');
-        return;
+        return res.status(200).send('OK');
     }
 
     try {
-    // 🔄 Смарт-реконнект: відновлюємо з'єднання з пулом Supabase у разі таймауту (фікс P1001)
-    await prisma.$connect().catch(() => {});
+        // 🔄 Смарт-реконнект до Supabase
+        await prisma.$connect().catch(() => {});
 
-    const existingTx = await prisma.transaction.findFirst({ where: { monoId: monoId } });
-    if (existingTx) return;
+        // 🛑 Перевірка на наявність дубля
+        const existingTx = await prisma.transaction.findFirst({ where: { monoId: monoId } });
+        if (existingTx) {
+            console.log(`ℹ️ Транзакція ${monoId} вже існує. Ігноруємо дубль.`);
+            return res.status(200).send('OK');
+        }
 
-        // 🛑 ЗАЛІЗОБЕТОННИЙ ФІЛЬТР: Ігноруємо парне зарахування (+) на Банку/депозит
+        // 🛑 ФІЛЬТР: Ігноруємо парне зарахування (+) на Банку/депозит
         const lowerDesc = description.toLowerCase();
         const isJarDeposit = isIncome && (
             lowerDesc.includes('депозит') || 
@@ -1200,7 +1162,7 @@ app.post('/monobank', async (req, res) => {
 
         if (isJarDeposit) {
             console.log(`ℹ️ Ігноруємо парне зарахування на Банку/депозит: "${description}"`);
-            return;
+            return res.status(200).send('OK');
         }
 
         // ДЕТЕКТОР ЗНЯТТЯ ГОТІВКИ (Спліт без AI)
@@ -1245,10 +1207,12 @@ app.post('/monobank', async (req, res) => {
                         `${commission > 0 ? `💸 <b>Комісія банку:</b> <code>${commission.toFixed(2)}</code> грн\n` : ''}` +
                         `📝 <b>Опис:</b> <i>${cleanDescription}</i>`;
 
-            return await bot.telegram.sendMessage(process.env.MY_CHAT_ID, msg, {
+            await bot.telegram.sendMessage(process.env.MY_CHAT_ID, msg, {
                 parse_mode: 'HTML',
                 ...Markup.inlineKeyboard([[Markup.button.callback('✏️ Уточнити', `edit_${savedTx.id}`)]])
             });
+
+            return res.status(200).send('OK');
         }
 
         // ЗВИЧАЙНІ ТРАНЗАКЦІЇ (Захищений виклик AI)
@@ -1306,8 +1270,11 @@ app.post('/monobank', async (req, res) => {
             ...Markup.inlineKeyboard([[Markup.button.callback('✏️ Уточнити', `edit_${savedTx.id}`)]])
         });
 
+        return res.status(200).send('OK');
+
     } catch (e) {
         console.error('💥 Критична помилка обробки Монобанку:', e);
+        return res.status(500).send('Internal Server Error');
     }
 });
 

@@ -16,7 +16,7 @@ model Transaction {
   description String?  
   workspace   String   @default("Особисте") // "Особисте" або "Проєкт"
   createdAt   DateTime @default(now())
-  monoId      String?
+  monoId      String?  @unique // унікальний ідентифікатор транзакції з Mono API
   source      String?  @default("card") // 'card' або 'cash' (звідки)
   toSource    String?  // 'card' або 'cash' (куди, використовується тільки для type: 'transfer'
   is_deleted  Boolean  @default(false)

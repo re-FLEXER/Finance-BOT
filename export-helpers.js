@@ -1,8 +1,3 @@
-const { PrismaClient } = require('@prisma/client');
-const { Parser } = require('json2csv');
-
-const prisma = new PrismaClient();
-
 // Словник перекладу типів транзакцій
 const TYPE_TRANSLATIONS = {
     income: '🟢 Дохід',
@@ -23,76 +18,63 @@ const SOURCE_TRANSLATIONS = {
     cash: '💵 Готівка'
 };
 
+// 🛡 Захист від CSV Formula Injection
+function sanitizeForCsv(value) {
+    if (typeof value !== 'string') return value;
+    const dangerousChars = ['=', '+', '-', '@'];
+    const trimmed = value.trim();
+    
+    if (dangerousChars.some(char => trimmed.startsWith(char))) {
+        return `'${value}`; // Додаємо одинарну лапку на початок
+    }
+    return value;
+}
+
 /**
  * Формує CSV-стрінг із транзакціями
- * @param {boolean} onlyCurrentMonth - якщо true, експортує лише поточний місяць
+ * @param {Array} transactions - Масив об'єктів транзакцій з БД
+ * @returns {string} - Згенерований CSV рядок
  */
-async function generateTransactionsCsv(onlyCurrentMonth = false) {
-    const whereCondition = { is_deleted: false };
-
-    if (onlyCurrentMonth) {
-        const now = new Date();
-        const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
-        const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
-
-        whereCondition.createdAt = {
-            gte: startOfMonth,
-            lte: endOfMonth
-        };
+function generateCsvReport(transactions) {
+    if (!transactions || transactions.length === 0) {
+        return '';
     }
 
-    const transactions = await prisma.transaction.findMany({
-        where: whereCondition,
-        orderBy: { createdAt: 'desc' }
+    // Заголовки стовпчиків
+    const headers = ['ID', 'Дата', 'Тип', 'Сума (грн)', 'Джерело', 'Категорія', 'Опис', 'Простір'];
+
+    // Формуємо рядки даних
+    const rows = transactions.map(tx => {
+        const dateStr = new Date(tx.createdAt).toLocaleString('uk-UA', { timeZone: 'Europe/Kyiv' });
+        const typeStr = TYPE_TRANSLATIONS[tx.type] || tx.type;
+        const sourceStr = SOURCE_TRANSLATIONS[tx.source] || tx.source;
+        
+        // 🛡 Огортаємо користувацькі текстові поля в санітайзер від CSV Injection
+        const safeCategory = sanitizeForCsv(tx.category || '');
+        const safeDescription = sanitizeForCsv(tx.description || '');
+
+        return [
+            tx.id,
+            `"${dateStr}"`,
+            `"${typeStr}"`,
+            tx.amount,
+            `"${sourceStr}"`,
+            `"${safeCategory.replace(/"/g, '""')}"`,
+            `"${safeDescription.replace(/"/g, '""')}"`,
+            `"${tx.workspace || 'Особисте'}"`
+        ];
     });
 
-    if (transactions.length === 0) {
-        return { count: 0, csvBuffer: null };
-    }
+    // Об'єднуємо заголовки та рядки в єдиний CSV-текст з підтримкою UTF-8 BOM
+    const csvContent = [
+        headers.join(','),
+        ...rows.map(row => row.join(','))
+    ].join('\n');
 
-    // Підготовка даних для CSV
-    const formattedData = transactions.map(t => {
-        // Форматування дати у YYYY-MM-DD HH:mm (Kyiv Timezone)
-        const dateFormatted = new Date(t.createdAt).toLocaleString('uk-UA', {
-            timeZone: 'Europe/Kyiv',
-            year: 'numeric',
-            month: '2-digit',
-            day: '2-digit',
-            hour: '2-digit',
-            minute: '2-digit'
-        });
-
-        let sourceText = SOURCE_TRANSLATIONS[t.source] || t.source || '💳 Картка';
-        if (t.type === 'transfer' && t.toSource) {
-            const toText = SOURCE_TRANSLATIONS[t.toSource] || t.toSource;
-            sourceText = `${sourceText} ➔ ${toText}`;
-        }
-
-        return {
-            ID: t.id,
-            'Дата': dateFormatted,
-            'Тип': TYPE_TRANSLATIONS[t.type] || t.type,
-            'Сума (грн)': t.amount,
-            'Категорія': t.category || 'Загальне',
-            'Простір (Workspace)': t.workspace || 'Особисте',
-            'Джерело': sourceText,
-            'Опис': t.description || ''
-        };
-    });
-
-    const fields = ['ID', 'Дата', 'Тип', 'Сума (грн)', 'Категорія', 'Простір (Workspace)', 'Джерело', 'Опис'];
-    const json2csvParser = new Parser({ fields, delimiter: ';' }); // Скраплюємо крапкою з комою (стандарт для Excel)
-    const csvContent = json2csvParser.parse(formattedData);
-
-    // Додаємо UTF-8 BOM (\uFEFF) для ідеального відображення кирилиці в Excel
-    const csvBuffer = Buffer.from('\uFEFF' + csvContent, 'utf-8');
-
-    return {
-        count: transactions.length,
-        csvBuffer
-    };
+    return '\uFEFF' + csvContent; // \uFEFF додає BOM для коректного відображення кирилиці в Excel
 }
 
 module.exports = {
-    generateTransactionsCsv
+    sanitizeForCsv,
+    generateCsvReport
 };

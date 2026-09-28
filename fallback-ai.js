@@ -12,10 +12,10 @@ async function generateTextWithFallback(prompt) {
 
     // 1. Спроба через Gemini (Основний канал)
     try {
-        const model = genAI.getGenerativeModel({ model: 'gemini-3.5-flash' });
+        const model = genAI.getGenerativeModel({ model: 'gemini-3.8-flash' });
         const result = await model.generateContent(prompt);
         rawText = result.response.text();
-        providerName = 'Gemini (3.5 Flash)';
+        providerName = 'Gemini (3.8 Flash)';
     } catch (geminiErr) {
         console.warn('⚠️ Gemini API відмовив. Перемикаю на Groq (GPT-OSS-120B)...', geminiErr.message);
         
