@@ -6,7 +6,7 @@
 require('dotenv').config();
 const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
-const { sanitizeForCsv } = require('./export-helpers.js');
+const { generateCsvReport, sanitizeForCsv } = require('./export-helpers.js');
 
 // Імпортуємо AI SDK (перевірка реальних ключів із .env)
 const { GoogleGenerativeAI } = require('@google/generative-ai');
@@ -20,6 +20,7 @@ const report = {
     startTime: Date.now(),
     errors: []
 };
+const securityOnly = process.argv.includes('--security-only');
 
 function escapeHtml(text) {
     if (!text) return '';
@@ -32,6 +33,8 @@ function escapeHtml(text) {
 }
 
 async function runTestBlock(category, testName, testFn) {
+    if (securityOnly && category !== 'Security') return;
+
     report.total++;
     const startTime = Date.now();
     try {
@@ -73,6 +76,7 @@ async function main() {
     console.log('================================================================');
     console.log(`⏱️ Запуск: ${new Date().toLocaleString('uk-UA')}`);
     console.log(`🖥️ Node.js: ${process.version}`);
+    if (securityOnly) console.log('🔒 Режим: локальні security-тести без БД та зовнішніх AI API');
     console.log('================================================================\n');
 
     // ----------------------------------------------------
@@ -182,6 +186,22 @@ async function main() {
         return payloads.every(p => sanitizeForCsv(p).startsWith("'"));
     });
 
+    await runTestBlock('Security', 'CSV injection in every text column', async () => {
+        const payload = '=SUM(A1:A500)';
+        const csv = generateCsvReport([{
+            id: 1,
+            createdAt: new Date(),
+            type: payload,
+            amount: 1,
+            source: payload,
+            category: payload,
+            description: payload,
+            workspace: payload
+        }]);
+        const safeCell = `"'${payload}"`;
+        return csv.split('\n')[1].split(safeCell).length - 1 === 5;
+    });
+
     await runTestBlock('Security', 'Перевантаження пам\'яті великим текстом (500,000 символів)', async () => {
         const hugeString = 'X'.repeat(500000);
         const processed = escapeHtml(hugeString);
@@ -234,6 +254,11 @@ async function main() {
     console.log('================================================================\n');
 
     await prisma.$disconnect();
+    process.exitCode = report.failed === 0 ? 0 : 1;
 }
 
-main();
+main().catch(async (error) => {
+    console.error('Критична помилка stress-test:', error);
+    await prisma.$disconnect().catch(() => {});
+    process.exitCode = 1;
+});

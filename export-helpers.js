@@ -30,6 +30,11 @@ function sanitizeForCsv(value) {
     return value;
 }
 
+function csvTextCell(value) {
+    const safeValue = sanitizeForCsv(String(value ?? ''));
+    return `"${safeValue.replace(/"/g, '""')}"`;
+}
+
 /**
  * Формує CSV-стрінг із транзакціями
  * @param {Array} transactions - Масив об'єктів транзакцій з БД
@@ -46,22 +51,18 @@ function generateCsvReport(transactions) {
     // Формуємо рядки даних
     const rows = transactions.map(tx => {
         const dateStr = new Date(tx.createdAt).toLocaleString('uk-UA', { timeZone: 'Europe/Kyiv' });
-        const typeStr = TYPE_TRANSLATIONS[tx.type] || tx.type;
-        const sourceStr = SOURCE_TRANSLATIONS[tx.source] || tx.source;
-        
-        // 🛡 Огортаємо користувацькі текстові поля в санітайзер від CSV Injection
-        const safeCategory = sanitizeForCsv(tx.category || '');
-        const safeDescription = sanitizeForCsv(tx.description || '');
+        const typeStr = TYPE_TRANSLATIONS[tx.type] || tx.type || '';
+        const sourceStr = SOURCE_TRANSLATIONS[tx.source] || tx.source || '';
 
         return [
             tx.id,
-            `"${dateStr}"`,
-            `"${typeStr}"`,
+            csvTextCell(dateStr),
+            csvTextCell(typeStr),
             tx.amount,
-            `"${sourceStr}"`,
-            `"${safeCategory.replace(/"/g, '""')}"`,
-            `"${safeDescription.replace(/"/g, '""')}"`,
-            `"${tx.workspace || 'Особисте'}"`
+            csvTextCell(sourceStr),
+            csvTextCell(tx.category),
+            csvTextCell(tx.description),
+            csvTextCell(tx.workspace || 'Особисте')
         ];
     });
 

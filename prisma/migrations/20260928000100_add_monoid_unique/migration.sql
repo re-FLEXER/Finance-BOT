@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX "Transaction_monoId_key" ON "Transaction"("monoId");

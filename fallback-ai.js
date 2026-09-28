@@ -16,9 +16,7 @@ async function generateTextWithFallback(prompt) {
         const result = await model.generateContent(prompt);
         rawText = result.response.text();
         providerName = 'Gemini (3.8 Flash)';
-    } catch (geminiErr) {
-        console.warn('⚠️ Gemini API відмовив. Перемикаю на Groq (GPT-OSS-120B)...', geminiErr.message);
-        
+    } catch {
         // 2. Спроба через Groq (Резервний канал)
         try {
             const chatCompletion = await groq.chat.completions.create({
@@ -35,7 +33,6 @@ async function generateTextWithFallback(prompt) {
             rawText = chatCompletion.choices[0]?.message?.content || '';
             providerName = 'Groq (GPT-OSS-120B)';
         } catch (groqErr) {
-            console.error('❌ Groq API також відмовив:', groqErr.message);
             throw new Error('ALL_AI_PROVIDERS_DOWN', { cause: groqErr });
         }
     }
@@ -58,14 +55,53 @@ async function generateTextWithFallback(prompt) {
     };
 }
 
+async function generateChatTextWithFallback(systemInstruction, history, userText) {
+    let rawText;
+    let providerName;
+
+    try {
+        const model = genAI.getGenerativeModel({
+            model: 'gemini-3.8-flash',
+            systemInstruction
+        });
+        const chat = model.startChat({ history });
+        const result = await chat.sendMessage(userText);
+        rawText = result.response.text();
+        providerName = 'Gemini (3.8 Flash)';
+    } catch {
+        try {
+            const messages = [
+                { role: 'system', content: systemInstruction },
+                ...history.map((message) => ({
+                    role: message.role === 'model' ? 'assistant' : message.role,
+                    content: message.parts.map((part) => part.text || '').join('')
+                })),
+                { role: 'user', content: userText }
+            ];
+            const chatCompletion = await groq.chat.completions.create({
+                messages,
+                model: 'openai/gpt-oss-120b'
+            });
+
+            rawText = chatCompletion.choices[0]?.message?.content || '';
+            providerName = 'Groq (GPT-OSS-120B)';
+        } catch (groqErr) {
+            throw new Error('ALL_AI_PROVIDERS_DOWN', { cause: groqErr });
+        }
+    }
+
+    return {
+        text: rawText,
+        provider: providerName
+    };
+}
+
 async function generateTextWithRetry(prompt, maxRetries = 5, delayMs = 12000) {
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
-            console.log(`🔄 Спроба генерації AI (${attempt}/${maxRetries})...`);
             const result = await generateTextWithFallback(prompt);
             return result;
         } catch (err) {
-            console.warn(`⏳ Усі AI провайдери недоступні (${err.message}). Очікування ${delayMs / 1000} сек...`);
             if (attempt === maxRetries) {
                 throw new Error(`Не вдалося отримати відповідь від AI після ${maxRetries} спроб.`, { cause: err });
             }
@@ -76,5 +112,6 @@ async function generateTextWithRetry(prompt, maxRetries = 5, delayMs = 12000) {
 
 module.exports = {
     generateTextWithFallback,
+    generateChatTextWithFallback,
     generateTextWithRetry
 };

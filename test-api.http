@@ -1,3 +1,5 @@
+@monoSecret = {{$dotenv MONO_SECRET}}
+
 ### 1. Перевірка локального сервера / health-check
 GET http://localhost:3000/ping
 
@@ -9,7 +11,7 @@ GET https://jsonplaceholder.typicode.com/posts/1
 ###
 
 ### 3. Імітація вебхуку Monobank на твій сервер
-POST http://localhost:3000/monobank/ofh983ufkjsf09jsf0js9fv0ruv0w8ury9823yr983vut-83039ur8jsljf-r23r02r981fofj
+POST http://localhost:3000/monobank/{{monoSecret}}
 Content-Type: application/json
 
 {
@@ -41,13 +43,13 @@ X-Token: uOzgEn4Uot5Ceh6V86w7PNiYPG8aZ-h5url7-hOR_M6Q
 Content-Type: application/json
 
 {
-  "webHookUrl": "https://finance-bot-v24m.onrender.com/monobank/ofh983ufkjsf09jsf0js9fv0ruv0w8ury9823yr983vut-83039ur8jsljf-r23r02r981fofj"
+  "webHookUrl": "https://finance-bot-v24m.onrender.com/monobank/{{monoSecret}}"
 }
 
 ###
 
 ### 5. Імітація локального вебхуку Monobank (Захищений маршрут)
-POST http://localhost:3000/monobank/ofh983ufkjsf09jsf0js9fv0ruv0w8ury9823yr983vut-83039ur8jsljf-r23r02r981fofj
+POST http://localhost:3000/monobank/{{monoSecret}}
 Content-Type: application/json
 
 {

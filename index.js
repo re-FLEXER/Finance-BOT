@@ -4,11 +4,10 @@ const cron = require('node-cron');
 const crypto = require('crypto');
 const { Telegraf, Markup } = require('telegraf');
 const { PrismaClient } = require('@prisma/client');
-const { GoogleGenerativeAI } = require('@google/generative-ai');
-const { generateTextWithFallback, generateTextWithRetry } = require('./fallback-ai');
+const { generateTextWithFallback, generateTextWithRetry, generateChatTextWithFallback } = require('./fallback-ai');
 const { getMonthlyAnalyticsData } = require('./monthly-analytics');
 const { generateMonthlyAudit } = require('./monthly-ai');
-const { generateTransactionsCsv } = require('./export-helpers');
+const { generateCsvReport } = require('./export-helpers');
 
 const app = express();
 app.use(express.json());
@@ -70,8 +69,6 @@ bot.use(async (ctx, next) => {
         } catch (e) {
             console.error('Помилка відправки алерту про Unavtorized User', e);
         }
-    } else {
-        console.warn(`⏳ Алерт від несанкціонованого юзера ${userId} проігноровано (cooldown 1 хв).`);
     }
 
     // 5. Екран відмови для Unavtorized User
@@ -92,8 +89,30 @@ bot.use(async (ctx, next) => {
     return ctx.replyWithHTML(rejectMsg);
 });
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const userStates = {};
+
+async function createTransactionsCsv(onlyCurrentMonth = false) {
+    const where = { is_deleted: false };
+
+    if (onlyCurrentMonth) {
+        const now = new Date();
+        where.createdAt = {
+            gte: new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0),
+            lte: new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999)
+        };
+    }
+
+    const transactions = await prisma.transaction.findMany({
+        where,
+        orderBy: { createdAt: 'desc' }
+    });
+    const csv = generateCsvReport(transactions);
+
+    return {
+        count: transactions.length,
+        csvBuffer: csv ? Buffer.from(csv, 'utf8') : null
+    };
+}
 
 // 🛡 Хелпер для безпечного екранування спецсимволів HTML
 function escapeHtml(text) {
@@ -101,7 +120,19 @@ function escapeHtml(text) {
     return String(text)
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;');
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function matchesSecret(incomingSecret, expectedSecret) {
+    if (typeof expectedSecret !== 'string' || expectedSecret.length < 32 || typeof incomingSecret !== 'string') {
+        return false;
+    }
+
+    const incoming = Buffer.from(incomingSecret);
+    const expected = Buffer.from(expectedSecret);
+    return incoming.length === expected.length && crypto.timingSafeEqual(incoming, expected);
 }
 
 // 📊 Хелпер для генерації візуального прогрес-бару
@@ -610,7 +641,6 @@ bot.command('add', async (ctx) => {
 Формат JSON: {"type": "expense", "category": "...", "workspace": "..."}`;
 
         const { text: textResponse, provider } = await generateTextWithFallback(prompt);
-        console.log(`🤖 /add оброблено через: ${provider}`);
 
         const cleanJson = textResponse.trim().replace(/```json/g, '').replace(/```/g, '').trim();
         const aiData = JSON.parse(cleanJson);
@@ -629,7 +659,7 @@ bot.command('add', async (ctx) => {
             ctx.chat.id,
             statusMsg.message_id,
             null,
-            `✅ <b>Витрату успішно додано!</b>\n\n💵 <b>Сума:</b> <code>${amount.toFixed(2)}</code> грн\n🏷 <b>Категорія:</b> ${escapeHtml(aiData.category)}\n📦 <b>Простір:</b> ${aiData.workspace}\n📝 <b>Опис:</b> <i>${escapeHtml(description)}</i>\n\n🤖 <i>Оброблено через: ${provider}</i>`,
+            `✅ <b>Витрату успішно додано!</b>\n\n💵 <b>Сума:</b> <code>${amount.toFixed(2)}</code> грн\n🏷 <b>Категорія:</b> ${escapeHtml(aiData.category)}\n📦 <b>Простір:</b> ${escapeHtml(aiData.workspace || 'Особисте')}\n📝 <b>Опис:</b> <i>${escapeHtml(description)}</i>\n\n🤖 <i>Оброблено через: ${provider}</i>`,
             { parse_mode: 'HTML' }
         );
     } catch (e) {
@@ -680,8 +710,6 @@ async function getChatHistory(userId) {
         }));
 
         // 2. Логуємо для діагностики в термінал
-        console.log('📜 Завантажена історія з Supabase:', JSON.stringify(formattedHistory, null, 2));
-
         // 3. І тільки в кінці повертаємо результат
         return formattedHistory;
 
@@ -827,7 +855,7 @@ bot.command('export', async (ctx) => {
     const statusMsg = await ctx.reply('⏳ Формую CSV-файл з транзакціями...');
 
     try {
-        const { count, csvBuffer } = await generateTransactionsCsv(isMonthOnly);
+        const { count, csvBuffer } = await createTransactionsCsv(isMonthOnly);
 
         if (count === 0) {
             await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
@@ -889,24 +917,10 @@ async function handleAdvisorChat(ctx, userText) {
 3. Якщо користувач хоче зробити витрату, але має борги чи малий баланс — підсвіти це як ризик.
 `;
 
-        const advisorModel = genAI.getGenerativeModel({ 
-            model: "gemini-3.8-flash",
-            systemInstruction: systemInstruction 
-        });
-
-        const chat = advisorModel.startChat({ history });
-
-        let adviceResult;
-        try {
-            adviceResult = await chat.sendMessage(userText);
-        } catch (err) {
-            console.warn('Первинний запит не вдався, робимо повтор...', err);
-            await new Promise(res => setTimeout(res, 1000));
-            adviceResult = await chat.sendMessage(userText);
-        }
+        const adviceResult = await generateChatTextWithFallback(systemInstruction, history, userText);
 
         // Безпечно обробляємо відповідь
-        let safeResponse = cleanAiResponse(adviceResult.response.text());
+        const safeResponse = cleanAiResponse(adviceResult.text);
 
         await ctx.telegram.deleteMessage(ctx.chat.id, waitMsg.message_id);
         
@@ -1013,8 +1027,7 @@ bot.on('text', async (ctx) => {
 
 Визнач type, category (коротко, 1-2 слова) та workspace. Формат JSON: {"type": "...", "category": "...", "workspace": "..."}`;
 
-            const { text: textResponse, provider } = await generateTextWithFallback(prompt);
-            console.log(`🤖 Уточнення оброблено через: ${provider}`);
+            const { text: textResponse } = await generateTextWithFallback(prompt);
             const cleanJson = textResponse.replace(/```json/g, '').replace(/```/g, '').trim();
             const aiData = JSON.parse(cleanJson);
             
@@ -1032,7 +1045,7 @@ bot.on('text', async (ctx) => {
                 ctx.chat.id,
                 statusMsg.message_id,
                 null,
-                `✅ <b>Транзакцію успішно оновлено!</b>\n🏷 <b>Категорія:</b> ${escapeHtml(aiData.category)}\n📦 <b>Простір:</b> ${aiData.workspace}`,
+                `✅ <b>Транзакцію успішно оновлено!</b>\n🏷 <b>Категорія:</b> ${escapeHtml(aiData.category)}\n📦 <b>Простір:</b> ${escapeHtml(aiData.workspace || 'Особисте')}`,
                 { parse_mode: 'HTML' }
             );
         } catch (e) {
@@ -1045,8 +1058,6 @@ bot.on('text', async (ctx) => {
             );
         }
     }
-
-    console.log(`📩 Нове повідомлення від ${userId}: "${userText}"`);
 
     // 4. AI-РОУТЕР: Автоматична перевірка на транзакцію у звичайному тексті
     const intentData = await classifyUserIntent(userText);
@@ -1090,7 +1101,7 @@ bot.on('text', async (ctx) => {
                 `✅ <b>Транзакцію зафіксовано!</b>\n\n` +
                 `${icon} <b>Сума:</b> <code>${tx.amount.toFixed(2)}</code> грн${sourceInfo}\n` +
                 `🏷 <b>Категорія:</b> ${escapeHtml(tx.category)}\n` +
-                `📦 <b>Простір:</b> ${tx.workspace}\n` +
+                `📦 <b>Простір:</b> ${escapeHtml(tx.workspace || 'Особисте')}\n` +
                 `📝 <b>Опис:</b> <i>${escapeHtml(tx.description)}</i>`,
                 Markup.inlineKeyboard([[Markup.button.callback('✏️ Уточнити', `edit_${tx.id}`)]])
             );
@@ -1118,7 +1129,7 @@ app.post('/monobank/:secret', async (req, res) => {
     const incomingSecret = req.params.secret;
     const expectedSecret = process.env.MONO_SECRET;
 
-    if (!expectedSecret || incomingSecret !== expectedSecret) {
+    if (!matchesSecret(incomingSecret, expectedSecret)) {
         console.warn(`🚨 Спроба несанкціонованого виклику /monobank від IP: ${req.ip}`);
         return res.status(403).send('Forbidden: Invalid Webhook Secret');
     }
@@ -1129,6 +1140,10 @@ app.post('/monobank/:secret', async (req, res) => {
     }
 
     const item = data.statementItem;
+    if (typeof item.id !== 'string' || !item.id.trim() || !Number.isFinite(item.amount)) {
+        return res.status(400).send('Invalid webhook payload');
+    }
+
     const amount = Math.abs(item.amount) / 100;
     const commission = item.commissionRate ? Math.abs(item.commissionRate) / 100 : 0;
     const description = item.description || 'Транзакція Monobank';
@@ -1136,7 +1151,6 @@ app.post('/monobank/:secret', async (req, res) => {
     const monoId = item.id;
 
     if (monoId && monoId.startsWith('test_')) {
-        console.log('🧪 Тестовий вебхук успішно прийнято!');
         return res.status(200).send('OK');
     }
 
@@ -1145,9 +1159,8 @@ app.post('/monobank/:secret', async (req, res) => {
         await prisma.$connect().catch(() => {});
 
         // 🛑 Перевірка на наявність дубля
-        const existingTx = await prisma.transaction.findFirst({ where: { monoId: monoId } });
+        const existingTx = await prisma.transaction.findUnique({ where: { monoId } });
         if (existingTx) {
-            console.log(`ℹ️ Транзакція ${monoId} вже існує. Ігноруємо дубль.`);
             return res.status(200).send('OK');
         }
 
@@ -1161,7 +1174,6 @@ app.post('/monobank/:secret', async (req, res) => {
         );
 
         if (isJarDeposit) {
-            console.log(`ℹ️ Ігноруємо парне зарахування на Банку/депозит: "${description}"`);
             return res.status(200).send('OK');
         }
 
@@ -1173,32 +1185,36 @@ app.post('/monobank/:secret', async (req, res) => {
         if (isCashWithdrawal) {
             const cleanAmount = amount - commission; 
 
-            const savedTx = await prisma.transaction.create({
-                data: {
-                    monoId: monoId,
-                    type: 'transfer',
-                    amount: cleanAmount,
-                    source: 'card',
-                    toSource: 'cash',
-                    category: 'Зняття готівки',
-                    description: description,
-                    workspace: 'Особисте'
-                }
-            });
-
-            if (commission > 0) {
-                await prisma.transaction.create({
+            const savedTx = await prisma.$transaction(async (tx) => {
+                const withdrawal = await tx.transaction.create({
                     data: {
-                        monoId: `${monoId}_commission`,
-                        type: 'expense',
-                        amount: commission,
+                        monoId: monoId,
+                        type: 'transfer',
+                        amount: cleanAmount,
                         source: 'card',
-                        category: 'Комісії банку',
-                        description: `Комісія: ${description}`,
+                        toSource: 'cash',
+                        category: 'Зняття готівки',
+                        description: description,
                         workspace: 'Особисте'
                     }
                 });
-            }
+
+                if (commission > 0) {
+                    await tx.transaction.create({
+                        data: {
+                            monoId: `${monoId}_commission`,
+                            type: 'expense',
+                            amount: commission,
+                            source: 'card',
+                            category: 'Комісії банку',
+                            description: `Комісія: ${description}`,
+                            workspace: 'Особисте'
+                        }
+                    });
+                }
+
+                return withdrawal;
+            });
 
             const cleanDescription = escapeHtml(description);
             const msg = `🏦 <b>Monobank</b> | Автоматично\n\n` +
@@ -1236,8 +1252,7 @@ app.post('/monobank/:secret', async (req, res) => {
 
 Визнач type, category (коротко, 1-2 слова) та workspace. Формат JSON: {"type": "...", "category": "...", "workspace": "..."}`;
 
-            const { text: textResponse, provider } = await generateTextWithFallback(prompt);
-            console.log(`🤖 Monobank webhook оброблено через: ${provider}`);
+            const { text: textResponse } = await generateTextWithFallback(prompt);
             const cleanJson = textResponse.replace(/```json/g, '').replace(/```/g, '').trim();
             aiData = JSON.parse(cleanJson);
         } catch (aiErr) {
@@ -1260,7 +1275,7 @@ app.post('/monobank/:secret', async (req, res) => {
         const cleanCategory = escapeHtml(aiData.category || 'Загальне');
 
         const msg = `🏦 <b>Monobank</b> | Автоматично\n\n` +
-                    `📦 <b>Простір:</b> ${aiData.workspace || 'Особисте'}\n` +
+                    `📦 <b>Простір:</b> ${escapeHtml(aiData.workspace || 'Особисте')}\n` +
                     `🏷 <b>Категорія:</b> ${cleanCategory}\n\n` +
                     `💵 <b>Сума:</b> <code>${amount.toFixed(2)}</code> грн\n` +
                     `📝 <b>Опис:</b> <i>${cleanDescription}</i>`;
@@ -1273,6 +1288,10 @@ app.post('/monobank/:secret', async (req, res) => {
         return res.status(200).send('OK');
 
     } catch (e) {
+        if (e.code === 'P2002' && monoId) {
+            const existingTx = await prisma.transaction.findUnique({ where: { monoId } }).catch(() => null);
+            if (existingTx) return res.status(200).send('OK');
+        }
         console.error('💥 Критична помилка обробки Монобанку:', e);
         return res.status(500).send('Internal Server Error');
     }
@@ -1382,7 +1401,6 @@ cron.schedule('55 23 28-31 * *', async () => {
 
     // Перевіряємо, чи завтра вже 1-ше число (тобто сьогодні останній день місяця)
     if (tomorrow.getDate() === 1) {
-        console.log('📅 Авто-запуск місячного аудиту за останніми даними...');
         await runAndSendMonthlyAudit(process.env.MY_CHAT_ID, true);
     }
 }, {
@@ -1391,7 +1409,6 @@ cron.schedule('55 23 28-31 * *', async () => {
 
 // --- 1. АВТОМАТИЧНИЙ ЩОДЕННИЙ ЗВІТ (23:54) ---
 cron.schedule('54 23 * * *', async () => {
-    console.log('⏰ Запуск вечірнього звіту...');
     try {
         const data = await getDailyReportData();
 
@@ -1464,8 +1481,6 @@ cron.schedule('*/30 * * * *', async () => {
 
         if (pendingReports.length === 0) return;
 
-        console.log(`🧹 Нічний санітар: знайдено ${pendingReports.length} необроблених звітів.`);
-
         for (const report of pendingReports) {
             try {
                 const dailyData = JSON.parse(report.prompt);
@@ -1490,7 +1505,6 @@ ${cleanAiResponse(aiRes.text)}
                     data: { status: 'DONE' }
                 });
 
-                console.log(`✅ Завдання #${report.id} успішно оброблено санітаром.`);
             } catch (itemError) {
                 console.warn(`⏳ Завдання #${report.id} не вдалося обробити цього разу: ${itemError.message}`);
             }
@@ -1503,8 +1517,6 @@ ${cleanAiResponse(aiRes.text)}
 });
 
 app.listen(PORT, async () => {
-    console.log(`Сервер працює на порту ${PORT}`);
-    
     // ПОВЕРНУТО: Реєстрація меню підказок в самому Telegram
     // Реєстрація меню команд ТІЛЬКИ для тебе (конкретного chat_id)
     try {
@@ -1534,7 +1546,6 @@ app.listen(PORT, async () => {
             scope: { type: 'chat', chat_id: allowedUserId }
         });
 
-        console.log('✅ Персональне меню команд встановлено!');
     } catch (err) {
         console.error('Помилка встановлення меню команд:', err);
     }
@@ -1542,15 +1553,13 @@ app.listen(PORT, async () => {
     if (process.env.RENDER_EXTERNAL_URL) {
         const fullWebhookUrl = `${process.env.RENDER_EXTERNAL_URL}${WEBHOOK_PATH}`;
         await bot.telegram.setWebhook(fullWebhookUrl);
-        console.log(`Telegram Webhook встановлено: ${fullWebhookUrl}`);
     }
 });
 
 // --- КРОН 4. Автоматичний щотижневий бекап бази (неділя о 23:00) ---
 cron.schedule('0 23 * * 0', async () => {
-    console.log('📦 Запуск автоматичного щотижневого бекапу...');
     try {
-        const { count, csvBuffer } = await generateTransactionsCsv(false);
+        const { count, csvBuffer } = await createTransactionsCsv(false);
 
         if (count === 0 || !csvBuffer) return;
 
@@ -1617,8 +1626,7 @@ async function classifyUserIntent(userText) {
 ВІДПОВІДАЙ ВИКЛЮЧНО В ФОРМАТІ JSON без додаткових символів чи markdown.`;
 
     try {
-        const { text: textResponse, provider } = await generateTextWithFallback(prompt);
-        console.log(`🤖 Intent оброблено через: ${provider}`);
+        const { text: textResponse } = await generateTextWithFallback(prompt);
         const cleanJson = textResponse.trim().replace(/```json/g, '').replace(/```/g, '').trim(); 
         return JSON.parse(cleanJson); 
     } catch (e) {

@@ -58,8 +58,6 @@ ${categoriesSummary}
 
     try {
         const { text: rawResponse, provider } = await generateTextWithFallback(prompt);
-        console.log(`🤖 AI Audit згенеровано через: ${provider}`);
-
         let cleanText = rawResponse.trim()
             .replace(/```json/gi, '')
             .replace(/```/g, '');

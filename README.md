@@ -61,7 +61,7 @@ flowchart TD
 
 | Файл | Відповідальність |
 | --- | --- |
-| `index.js` | Точка входу; Telegram-команди й обробники; Express-маршрути `/ping`, `/monobank` і Telegram webhook; статистика, AI-радник, звіти, cron-задачі та запуск сервера. |
+| `index.js` | Точка входу; Telegram-команди й обробники; Express-маршрути `/ping`, `/monobank/:secret` і Telegram webhook; статистика, AI-радник, звіти, cron-задачі та запуск сервера. |
 | `fallback-ai.js` | Генерація тексту через Gemini із резервним переходом на Groq; повторні спроби для AI-запитів. |
 | `monthly-analytics.js` | Агрегація метрик поточного/попереднього місяця, боргів і топ-категорій через Prisma. |
 | `monthly-ai.js` | Формування промпту й обробка JSON-відповіді AI-аудитора. |
@@ -88,6 +88,7 @@ DATABASE_URL=postgresql://user:password@host:5432/database?schema=public
 DIRECT_URL=postgresql://user:password@host:5432/database?schema=public
 GEMINI_API_KEY=your_gemini_api_key
 GROQ_API_KEY=your_groq_api_key
+MONO_SECRET=generate_a_random_secret_at_least_32_characters
 PORT=3000
 ```
 
@@ -101,7 +102,7 @@ PORT=3000
 | `GROQ_API_KEY` | Резервний AI-провайдер. |
 | `PORT` | HTTP-порт. На Render значення надає платформа; локально типовий порт — `3000`. |
 | `RENDER_EXTERNAL_URL` | Системна змінна Render. Якщо вона доступна, застосунок автоматично реєструє Telegram webhook. Не задавайте вручну без потреби. |
-| `MONO_TOKEN` | Не використовується поточним кодом. Для приймання webhook Monobank код наразі не перевіряє цей токен. |
+| `MONO_SECRET` | Випадковий секрет довжиною щонайменше 32 символи; захищає URL webhook Monobank. Зберігайте його лише в `.env` та налаштуваннях середовища. |
 
 Для Render PostgreSQL використовуйте URL-и, які надає база. Якщо застосовуєте пулер, задайте його адресу у `DATABASE_URL`, а пряме підключення для міграцій — у `DIRECT_URL`.
 
@@ -115,6 +116,8 @@ npm start
 ```
 
 Перевірте сервер за адресою `http://localhost:3000/ping`: очікувана відповідь — `OK`. Для локального тестування Monobank webhook є приклад у `test-api.http`; тестовий ID із префіксом `test_` лише підтверджується й не записується в БД.
+
+Для порожньої PostgreSQL БД застосуйте міграції звичайною командою `npx prisma migrate deploy`. Для вже заповненої БД, створеної до впровадження PostgreSQL migrations, спочатку звірте її схему з `prisma/schema.prisma`, одноразово позначте baseline як застосований командою `npx prisma migrate resolve --applied 20260928000000_baseline_postgresql`, а потім виконайте `npx prisma migrate deploy`. Не запускайте baseline resolve на порожній БД.
 
 ## Розгортання на Render
 
@@ -139,13 +142,13 @@ npm start
 
 ### 3. Додайте Environment Variables
 
-У розділі **Environment** сервісу задайте `BOT_TOKEN`, `MY_CHAT_ID`, `DATABASE_URL`, `DIRECT_URL`, `GEMINI_API_KEY` і `GROQ_API_KEY`. Не задавайте `PORT` вручну: Render встановлює його під час запуску. `RENDER_EXTERNAL_URL` Render надає автоматично.
+У розділі **Environment** сервісу задайте `BOT_TOKEN`, `MY_CHAT_ID`, `DATABASE_URL`, `DIRECT_URL`, `GEMINI_API_KEY`, `GROQ_API_KEY` і `MONO_SECRET`. Для вже наявної БД виконайте одноразовий baseline resolve до першого deploy із новими міграціями. Не задавайте `PORT` вручну: Render встановлює його під час запуску. `RENDER_EXTERNAL_URL` Render надає автоматично.
 
 ### 4. Перевірте запуск і webhook-и
 
 Після успішного deploy відкрийте `https://<ім'я-сервісу>.onrender.com/ping`. Під час запуску застосунок автоматично реєструє Telegram webhook на `RENDER_EXTERNAL_URL` із шляхом `/telegram/<BOT_TOKEN>`.
 
-Webhook Monobank має вказувати на `https://<ім'я-сервісу>.onrender.com/monobank`. **Не вмикайте публічний Monobank webhook для фінансових даних, доки endpoint не буде захищено автентифікацією та валідацією запиту.** У поточному коді `/monobank` приймає JSON без перевірки підпису/секрету.
+Webhook Monobank має вказувати на `https://<ім'я-сервісу>.onrender.com/monobank/<MONO_SECRET>`. Endpoint перевіряє секрет у URL і відхиляє неавторизовані запити; Monobank не підписує тіло webhook у цій інтеграції, тому використовуйте довгий випадковий секрет і не публікуйте URL.
 
 ## Фонові задачі
 
@@ -163,7 +166,7 @@ Webhook Monobank має вказувати на `https://<ім'я-сервісу
 - Не комітьте `.env`, токени бота, API-ключі або URL-и бази. `.env` уже виключений у `.gitignore`.
 - Бот зберігає фінансові записи й історію AI-чату в PostgreSQL. Команда `/reset` видаляє транзакції та історію чату; перед використанням переконайтеся, що маєте потрібні резервні копії.
 - Telegram webhook наразі використовує `BOT_TOKEN` у шляху; окремий `secret_token` для перевірки webhook не налаштований.
-- Monobank webhook `/monobank` наразі не автентифікується. Не вважайте `MONO_TOKEN` захистом, доки код явно його не перевіряє.
+- Monobank webhook використовує `MONO_SECRET` у URL; секрет із попереднього `test-api.http` був прибраний, але оскільки він уже був у Git-історії, замініть його в налаштуваннях Monobank та середовищі сервера.
 - CSV-експорт містить описи й категорії транзакцій. Обробляйте такі файли як приватні фінансові дані.
 
 ## Ліцензія
