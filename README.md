@@ -39,7 +39,7 @@ flowchart TD
     end
 
     subgraph Providers["AI providers"]
-        Gemini["Gemini: gemini-3.8-flash"]
+        Gemini["Gemini: gemini-3.5-flash"]
         Groq["Groq: openai/gpt-oss-120b"]
     end
 
@@ -84,7 +84,7 @@ flowchart TD
 - Telegram update надходить у Express-маршрут, що містить `BOT_TOKEN`, і передається Telegraf. Middleware пропускає тільки Telegram ID із `MY_CHAT_ID`; інші користувачі відхиляються.
 - Текст поза режимом порадника проходить AI-класифікацію. Намір транзакції записується в БД, намір синхронізації коригує баланс, а звичайне запитання передається раднику.
 - Monobank надсилає webhook на `/monobank/<MONO_SECRET>`. Після перевірки секрету й полів запиту обробник перевіряє `monoId`, класифікує операцію та створює запис. Зняття готівки й комісія створюються атомарно.
-- AI-запити проходять через `fallback-ai.js`: основний провайдер Gemini `gemini-3.8-flash`, резервний — Groq `openai/gpt-oss-120b`. Щоденний AI-звіт може повторювати запит через retry helper; недоступний звіт зберігається у `ReportQueue` зі статусом `PENDING`.
+- AI-запити проходять через `fallback-ai.js`: основний провайдер Gemini `gemini-3.5-flash`, резервний — Groq `openai/gpt-oss-120b`. Щоденний AI-звіт може повторювати запит через retry helper; недоступний звіт зберігається у `ReportQueue` зі статусом `PENDING`.
 - Дані зберігаються у PostgreSQL через Prisma. `Transaction.monoId` має бути унікальним для дедуплікації вебхуків.
 
 ## Можливості

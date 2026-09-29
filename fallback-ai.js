@@ -12,10 +12,10 @@ async function generateTextWithFallback(prompt) {
 
     // 1. Спроба через Gemini (Основний канал)
     try {
-        const model = genAI.getGenerativeModel({ model: 'gemini-3.8-flash' });
+        const model = genAI.getGenerativeModel({ model: 'gemini-3.5-flash' });
         const result = await model.generateContent(prompt);
         rawText = result.response.text();
-        providerName = 'Gemini (3.8 Flash)';
+        providerName = 'Gemini (3.5 Flash)';
     } catch {
         // 2. Спроба через Groq (Резервний канал)
         try {
@@ -61,13 +61,13 @@ async function generateChatTextWithFallback(systemInstruction, history, userText
 
     try {
         const model = genAI.getGenerativeModel({
-            model: 'gemini-3.8-flash',
+            model: 'gemini-3.5-flash',
             systemInstruction
         });
         const chat = model.startChat({ history });
         const result = await chat.sendMessage(userText);
         rawText = result.response.text();
-        providerName = 'Gemini (3.8 Flash)';
+        providerName = 'Gemini (3.5 Flash)';
     } catch {
         try {
             const messages = [

@@ -109,7 +109,7 @@ async function main() {
         // --- Google Gemini API ---
         const geminiKey = process.env.GEMINI_API_KEY;
         if (geminiKey) {
-            const geminiModel = 'gemini-3.8-flash';
+            const geminiModel = 'gemini-3.5-flash';
 
             console.log(`\n  🔹 Google Gemini (${geminiModel}):`);
 
