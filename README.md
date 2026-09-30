@@ -1,93 +1,73 @@
-# Financial Telegram Bot — v4.5 Release Candidate
+# Financial Telegram Bot + AI + Monobank (`v4.5 RELEASE`)
 
-Telegram-бот для приватного фінансового обліку з інтеграцією Monobank, Gemini/Groq, PostgreSQL та фінансовими звітами. Це документація для реліз-кандидата v4.5; фактична версія пакета в `package.json` може мати окреме значення.
+Приватний фінансовий бот у Telegram для обліку доходів, витрат, заощаджень і боргів. Він приймає операції з повідомлень та Monobank, зберігає їх у PostgreSQL і формує звіти за допомогою ШІ.
 
 ## Архітектура
 
 ```mermaid
 flowchart TD
-    Owner["Власник бота"]
-    Telegram["Telegram Bot API"]
-    Mono["Monobank webhook"]
-    Clock["node-cron: Europe/Kyiv"]
-    Monitor["Render health monitor"]
-
-    subgraph HTTP["Express HTTP server"]
-        TgRoute["POST /telegram/BOT_TOKEN"]
-        MonoRoute["POST /monobank/MONO_SECRET"]
-        Ping["GET /ping"]
+    %% ВХІДНІ ДАНІ
+    subgraph INPUTS["📥 1. Вхідні дані"]
+        User["👤 Користувач у Telegram"]
+        Mono["🏦 Monobank: транзакції"]
+        Cron["⏰ Автоматичні задачі"]
     end
 
-    subgraph App["index.js / Telegraf"]
-        Allowlist["MY_CHAT_ID allowlist"]
-        UpdateType{"Command, callback or text?"}
-        Commands["Commands and callbacks"]
-        Intent["Text intent classifier"]
-        Advisor["AI advisor and chat history"]
-        MonoAuth["Secret and payload validation"]
-        Dedup["monoId deduplication"]
-        MonoFlow{"Withdrawal or regular transaction"}
-        Atomic["Withdrawal + fee: Prisma transaction"]
-        ReportJobs["Daily, monthly, queue and backup jobs"]
+    %% СЕРВЕР І ЗАХИСТ
+    subgraph CORE["🛡️ 2. Сервер і захист"]
+        Server["🚀 Express + Telegraf"]
+        Security{"🔐 Перевірка доступу та секрету вебхука"}
     end
 
-    subgraph Modules["Application modules"]
-        Fallback["fallback-ai.js"]
-        MonthlyAnalytics["monthly-analytics.js"]
-        MonthlyAI["monthly-ai.js"]
-        Csv["export-helpers.js"]
+    %% ОБРОБКА ОПЕРАЦІЙ І ЗАПИТІВ
+    subgraph ENGINE["🧠 3. Обробка та ШІ"]
+        Router{"🔀 Визначення дії"}
+        Withdraw["🏦 Переказ зі збережень на картку (/withdraw)"]
+        AI_Module["🤖 Модуль ШІ з автоматичним перемиканням"]
+        Gemini["🟢 Gemini 3.5 Flash: основний"]
+        Groq["🟠 Groq GPT-OSS-120B: резервний"]
     end
 
-    subgraph Providers["AI providers"]
-        Gemini["Gemini: gemini-3.5-flash"]
-        Groq["Groq: openai/gpt-oss-120b"]
+    %% ЗБЕРІГАННЯ ДАНИХ
+    subgraph STORAGE["🗄️ 4. Збереження"]
+        Prisma["💎 Prisma ORM"]
+        DB[("🛢️ PostgreSQL / Supabase")]
     end
 
-    Prisma["Prisma Client"]
-    DB[("PostgreSQL")]
+    User -->|Команди та повідомлення| Server
+    Mono -->|Сповіщення вебхуком| Server
+    Cron -->|Запуск за розкладом| Server
 
-    Owner --> Telegram
-    Telegram -->|HTTPS webhook| TgRoute
-    TgRoute --> Allowlist
-    Allowlist --> UpdateType
-    UpdateType -->|command or callback| Commands
-    UpdateType -->|ordinary text| Intent
-    Intent -->|transaction / sync| Prisma
-    Intent -->|chat| Advisor
-    Advisor --> Fallback
-    Commands -->|manual operation| Prisma
-    Commands -->|export| Csv
+    Server --> Security
+    Security -->|Дозволено| Router
+    Router -->|Зняття зі збережень| Withdraw
+    Router -->|Аналіз витрат або чат| AI_Module
+    AI_Module -->|Результат аналізу| Router
 
-    Mono -->|HTTPS with secret URL| MonoRoute
-    MonoRoute --> MonoAuth --> Dedup --> MonoFlow
-    MonoFlow -->|cash withdrawal| Atomic
-    MonoFlow -->|regular operation| Fallback
-    Atomic --> Prisma
-    MonoFlow --> Prisma
+    AI_Module --> Gemini
+    Gemini -.->|Помилка 429 або 503| Groq
 
-    Clock --> ReportJobs
-    ReportJobs --> MonthlyAnalytics
-    ReportJobs --> MonthlyAI
-    ReportJobs --> Fallback
-    ReportJobs --> Csv
-    ReportJobs -->|reports / backup| Telegram
-    MonthlyAnalytics --> Prisma
-
-    Fallback -->|primary| Gemini
-    Fallback -->|on Gemini failure| Groq
+    Withdraw --> Prisma
+    Router -->|Запис операції| Prisma
     Prisma --> DB
-    Monitor --> Ping
 ```
 
-### Потоки обробки
+### Як це працює
 
-- Telegram update надходить у Express-маршрут, що містить `BOT_TOKEN`, і передається Telegraf. Middleware пропускає тільки Telegram ID із `MY_CHAT_ID`; інші користувачі відхиляються.
-- Текст поза режимом порадника проходить AI-класифікацію. Намір транзакції записується в БД, намір синхронізації коригує баланс, а звичайне запитання передається раднику.
-- Monobank надсилає webhook на `/monobank/<MONO_SECRET>`. Після перевірки секрету й полів запиту обробник перевіряє `monoId`, класифікує операцію та створює запис. Зняття готівки й комісія створюються атомарно.
-- AI-запити проходять через `fallback-ai.js`: основний провайдер Gemini `gemini-3.5-flash`, резервний — Groq `openai/gpt-oss-120b`. Щоденний AI-звіт може повторювати запит через retry helper; недоступний звіт зберігається у `ReportQueue` зі статусом `PENDING`.
-- Дані зберігаються у PostgreSQL через Prisma. `Transaction.monoId` має бути унікальним для дедуплікації вебхуків.
+- Telegram-повідомлення проходять перевірку власника за `MY_CHAT_ID`; сторонні користувачі не отримують доступу до команд.
+- Бот визначає дію: записати операцію, звірити баланс або відповісти як фінансовий радник.
+- `/withdraw <сума> [опис]` переносить суму зі збережень на картку: залишок картки зростає, заощадження зменшуються, загальний капітал не змінюється.
+- Вебхук Monobank перевіряє `MONO_SECRET` і захищає від дублікатів. Зняття готівки та комісія записуються однією атомарною транзакцією.
+- Gemini є основним ШІ-провайдером, Groq — резервним. Помилки Gemini, зокрема `429` і `503`, журналюються перед перемиканням.
+- Prisma зберігає операції, історію розмови й відкладені звіти у PostgreSQL.
 
-## Можливості
+## Нові можливості v4.5
+
+- 🏦 **Зняття зі збережень (`/withdraw`):** переказ коштів із Банки на картку без викривлення залишків і загального капіталу. Доступний також псевдонім `/withdrawsavings`.
+- 🛡️ **Діагностика та резервування ШІ:** помилки Gemini журналюються, після чого запит автоматично переходить до Groq.
+- 🧹 **Розумне очищення JSON:** сирі JSON-відповіді ШІ перетворюються на читабельний Telegram HTML.
+
+## Можливості бота
 
 - Облік доходів, витрат, заощаджень, переказів між карткою та готівкою, боргів і початкових балансів.
 - Автоматичне розпізнавання фінансових операцій із тексту та Monobank webhook.
@@ -95,6 +75,18 @@ flowchart TD
 - AI-радник зі збереженням короткої історії чату та режимом із тайм-аутом неактивності.
 - Щоденний звіт, місячний AI-аудит, CSV-експорт і щотижневий CSV-бекап у Telegram.
 - Доступ до команд обмежений власником бота.
+
+## Технологічний стек
+
+| Частина | Технологія |
+| --- | --- |
+| Середовище виконання | Node.js v24 |
+| Сервер і Telegram | Express, Telegraf |
+| Доступ до даних | Prisma ORM |
+| База даних | PostgreSQL, зокрема Supabase |
+| Основний ШІ-провайдер | Gemini `gemini-3.5-flash` |
+| Резервний ШІ-провайдер | Groq SDK, `openai/gpt-oss-120b` |
+| Автоматизація | `node-cron` |
 
 ## Команди Telegram
 
@@ -106,6 +98,7 @@ flowchart TD
 | `/setbalance <сума>` | Встановити початковий баланс картки. |
 | `/sync <сума>` | Звірити баланс бота з фактичним залишком картки. |
 | `/setsavings <сума>` | Синхронізувати загальну суму заощаджень. |
+| `/withdraw <сума> [опис]` | Переказати кошти зі збережень на картку; псевдонім — `/withdrawsavings`. |
 | `/debt <сума> <ім'я>` | Записати борг, який ви взяли. |
 | `/lend <сума> <ім'я>` | Записати гроші, позичені іншій людині. |
 | `/paydebt <сума>` | Записати погашення власного боргу. |
@@ -142,7 +135,7 @@ flowchart TD
 
 ## Вимоги та конфігурація
 
-- Node.js 20+ та npm.
+- Node.js v24 та npm.
 - PostgreSQL і доступ до БД через Prisma.
 - Telegram bot token від [@BotFather](https://t.me/BotFather).
 - Gemini та Groq API keys для AI-функцій і fallback.
@@ -224,7 +217,7 @@ Cron-задачі працюють у процесі Node.js за часовим
 
 Це in-process scheduler, не зовнішній durable queue. Використовуйте один постійно запущений інстанс: кілька реплік можуть дублювати cron-роботу, а sleep/restart може відкласти її. Стан режиму радника та cooldown для alert також зберігаються в пам’яті процесу й губляться після рестарту.
 
-## Безпека та приватність
+## Безпека та посилення захисту
 
 - **Telegram allowlist:** middleware звіряє `ctx.from.id` з `MY_CHAT_ID`; сторонні користувачі не отримують доступ до команд. Сповіщення про відмову та alert cooldown не замінюють rate limiting на рівні edge/proxy.
 - **Telegram webhook:** шлях містить `BOT_TOKEN`, але окремий Telegram `secret_token` header не налаштований. Не публікуйте URL webhook і використовуйте HTTPS.
@@ -258,6 +251,14 @@ node stress-test.js
 ```
 
 Повний режим робить read-запити до налаштованої PostgreSQL БД і реальні запити до Gemini/Groq, якщо відповідні ключі задані. Запускайте його лише на тестовому середовищі або з урахуванням вартості та лімітів API. Наразі в `package.json` окремого `test` script немає.
+
+Перевірка доступності моделей і реальний короткий запит до Gemini:
+
+```powershell
+node check-gemini-models.js
+```
+
+Скрипт показує моделі, доступні ключу, викликає `gemini-3.5-flash` із тайм-аутом 30 секунд і виводить повідомлення, статус та подробиці помилки. Його можна запустити локально або в оболонці Render із налаштованим `GEMINI_API_KEY`; запит звертається до зовнішнього API.
 
 ## Ліцензія
 

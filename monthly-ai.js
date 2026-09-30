@@ -1,13 +1,16 @@
 const { generateTextWithFallback } = require('./fallback-ai');
 
 /**
- * Формує AI-аудит на основі зібраних аналітичних даних
+ * 🧾 Готує запит на місячний аудит і розбирає структуровану відповідь ШІ.
+ * Якщо це перший місяць обліку, окремо просить не вигадувати порівняння з минулим.
+ * @param {object} analyticsData — показники місяця, категорії витрат і ознака першого місяця.
+ * @returns {Promise<{success: boolean, audit?: object, provider?: string, error?: string}>} Результат аудиту або причина невдачі.
  */
 async function generateMonthlyAudit(analyticsData) {
-    // 1. Додаємо isFirstMonth з об'єкта аналітики
+    // 📅 Беремо isFirstMonth з аналітики, щоб не просити ШІ про неіснуючі тренди.
     const { metrics, topCategories, isFirstMonth } = analyticsData;
 
-    // Готуємо текстову вижимку для промпту
+    // 📂 Стисло зводимо суми й зміни категорій для запиту.
     const categoriesSummary = topCategories.map((c, i) => {
         const trend = c.diffPercentage !== null 
             ? `(зміна: ${c.diff > 0 ? '+' : ''}${c.diff.toFixed(2)} грн, ${c.diffPercentage}%)`
@@ -15,7 +18,7 @@ async function generateMonthlyAudit(analyticsData) {
         return `${i + 1}.${c.category}: ${c.amount.toFixed(2)} грн ${trend}`;
     }).join('\n');
 
-    // 2. Формуємо спеціальний контекст для першого місяця
+    // 🧭 Для першого місяця вимикаємо порівняння з попереднім періодом.
     const monthContextNote = isFirstMonth 
         ? "⚠️ КОНТЕКСТ: Це ПЕРШИЙ місяць використання бота користувачем. Даних за минулий місяць НЕМАЄ. Не описуй тренди порівняно з минулим місяцем і не вигадуй порівнянь, оцінюй тільки поточні цифри."
         : "КОНТЕКСТ: Є дані за минулий місяць. Зверни увагу на зміни витрат (тренди) у категоріях.";

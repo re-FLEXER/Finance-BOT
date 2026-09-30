@@ -15,10 +15,19 @@ app.use(express.json());
 const prisma = new PrismaClient();
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
-// Map для збереження часу останнього алерта від користувача (userId -> timestamp)
+// 🧭 Час останнього сповіщення для кожного стороннього користувача.
 const alertCooldowns = new Map();
 
-// --- MIDDLEWARE: ЖОРСТКИЙ WHITELIST ТА АЛЕРТ ---
+// ==========================================
+// 🛡️ ПРОМІЖНЕ ПЗ ТА ЗАХИСТ БІЛОГО СПИСКУ
+// ==========================================
+/**
+ * 🛡️ Пропускає лише власника з MY_CHAT_ID, а всі сторонні звернення відхиляє.
+ * Дані для сповіщення екрануються, щоб унеможливити підміну розмітки повідомлення.
+ * @param {object} ctx — контекст повідомлення або натискання кнопки.
+ * @param {Function} next — наступний обробник для дозволеного користувача.
+ * @returns {Promise<unknown>} Результат наступного обробника або повідомлення про відмову.
+ */
 bot.use(async (ctx, next) => {
     // ✅ ПРОПУСКАЄ І ТЕКСТ, І КНОПКИ:
     if (!ctx.message && !ctx.callbackQuery) {
@@ -33,16 +42,16 @@ bot.use(async (ctx, next) => {
         return next();
     }
 
-    // 🛑 3. RATE-LIMITING (Захист від спаму алерตами)
+    // 🛑 Обмежуємо частоту сповіщень про сторонні звернення.
     const nowTimestamp = Date.now();
     const COOLDOWN_MS = 60 * 1000; // 1 хвилина
     const lastAlertTime = alertCooldowns.get(userId) || 0;
 
-    // Якщо від цього юзера вже надходив алерт протягом останньої хвилини — надсилаємо сповіщення адміну лише раз
+    // 🔕 Не надсилаємо власнику повторне сповіщення протягом хвилини.
     if (nowTimestamp - lastAlertTime >= COOLDOWN_MS) {
         alertCooldowns.set(userId, nowTimestamp);
 
-        // 🧹 4. САНІТАРИЗАЦІЯ ДАНИХ (Захист від HTML-ін'єкції)
+        // 🧹 4. Екрануємо дані, щоб вони не підмінили розмітку повідомлення.
         const firstName = escapeHtml(ctx.from?.first_name || 'Без імені');
         const lastName = escapeHtml(ctx.from?.last_name || '');
         const username = ctx.from?.username ? `@${escapeHtml(ctx.from.username)}` : 'немає юзернейму';
@@ -51,7 +60,7 @@ bot.use(async (ctx, next) => {
         const textSent = escapeHtml(ctx.message?.text || '[медіа/команда]');
         const now = new Date().toLocaleString('uk-UA', { timeZone: 'Europe/Kyiv'});
 
-        // FULL досьє для адміна
+        // 📋 Формуємо докладний звіт власнику про відхилену спробу.
         const alertMsg = 
 `🚨 <b>!IMPORTANT! Несанкціонований вхід — відхилено</b>
 
@@ -71,7 +80,7 @@ bot.use(async (ctx, next) => {
         }
     }
 
-    // 5. Екран відмови для Unavtorized User
+    // ⛔ Сторонній користувач отримує відмову й не доходить до інших обробників.
     const rejectMsg = 
 `🛑 <b>TERMINAL ACCESS RESTRICTED</b>
 ━━━━━━━━━━━━━━━━━━━
@@ -91,6 +100,11 @@ bot.use(async (ctx, next) => {
 
 const userStates = {};
 
+/**
+ * 📄 Завантажує активні записи та готує вміст для експорту.
+ * @param {boolean} [onlyCurrentMonth=false] — обмежити вибірку поточним місяцем.
+ * @returns {Promise<{count: number, csvBuffer: Buffer|null}>} Кількість записів і вміст файлу.
+ */
 async function createTransactionsCsv(onlyCurrentMonth = false) {
     const where = { is_deleted: false };
 
@@ -114,7 +128,11 @@ async function createTransactionsCsv(onlyCurrentMonth = false) {
     };
 }
 
-// 🛡 Хелпер для безпечного екранування спецсимволів HTML
+/**
+ * 🛡️ Екранує символи, які можуть змінити HTML-розмітку повідомлення.
+ * @param {string} text — текст, який потрібно показати як звичайний вміст.
+ * @returns {string} Безпечний для HTML текст.
+ */
 function escapeHtml(text) {
     if (!text) return '';
     return String(text)
@@ -125,6 +143,12 @@ function escapeHtml(text) {
         .replace(/'/g, '&#39;');
 }
 
+/**
+ * 🔐 Порівнює секрети вебхука без раннього виходу за окремими байтами.
+ * @param {string} incomingSecret — секрет із вхідного запиту.
+ * @param {string} expectedSecret — секрет, налаштований у середовищі.
+ * @returns {boolean} Чи збігаються секрети та чи має налаштований секрет достатню довжину.
+ */
 function matchesSecret(incomingSecret, expectedSecret) {
     if (typeof expectedSecret !== 'string' || expectedSecret.length < 32 || typeof incomingSecret !== 'string') {
         return false;
@@ -135,7 +159,13 @@ function matchesSecret(incomingSecret, expectedSecret) {
     return incoming.length === expected.length && crypto.timingSafeEqual(incoming, expected);
 }
 
-// 📊 Хелпер для генерації візуального прогрес-бару
+/**
+ * 📊 Створює смугу прогресу для відображення погашеного боргу.
+ * @param {number} current — уже виконана частина.
+ * @param {number} total — загальний обсяг.
+ * @param {number} [length=10] — кількість поділок смуги.
+ * @returns {string} Смуга прогресу з відсотком у форматі Telegram HTML.
+ */
 function generateProgressBar(current, total, length = 10) {
     if (total <= 0) return '<code>[▰▰▰▰▰▰▰▰▰▰]</code> <b>100%</b>';
 
@@ -152,22 +182,88 @@ function generateProgressBar(current, total, length = 10) {
 }
 
 
-// 🧹 Хелпер для очистки відповідей Gemini від Markdown-артефактів
+/**
+ * 🧹 Перетворює текст або відповідь JSON від ШІ на безпечний Telegram HTML.
+ * Для JSON показує назви полів і значення без фігурних дужок.
+ * @param {string} text — відповідь ШІ, можливо з розміткою або у форматі JSON.
+ * @returns {string} Очищений текст із безпечними HTML-тегами.
+ */
 function cleanAiResponse(text) {
     if (!text) return '';
-    return escapeHtml(text)
+    /**
+     * 🧹 Екранує одне значення та перетворює просту текстову розмітку на HTML.
+     * @param {*} value — значення для показу.
+     * @returns {string} Безпечне форматоване значення.
+     */
+    const formatText = (value) => escapeHtml(value === null || value === undefined ? '' : String(value))
         .replace(/\*\*(.*?)\*\*/g, '<b>$1</b>')  // Замінюємо **жирний** на <b>
         .replace(/\*(.*?)\*/g, '<i>$1</i>')      // Замінюємо *курсив* на <i>
         .replace(/`/g, '');                      // Прибираємо бектіки
+    /**
+     * 🧩 Перетворює вкладені масиви й об'єкти на читабельний рядок.
+     * @param {*} value — просте або вкладене значення JSON.
+     * @returns {string} Текстове представлення вкладених даних.
+     */
+    const formatValue = (value) => {
+        if (Array.isArray(value)) return value.map(formatValue).join(', ');
+        if (value && typeof value === 'object') {
+            return Object.entries(value).map(([key, nestedValue]) => `${escapeHtml(key)}: ${formatValue(nestedValue)}`).join('; ');
+        }
+        return formatText(value);
+    };
+
+    const responseText = String(text).trim();
+    if (responseText.startsWith('{') && responseText.endsWith('}')) {
+        try {
+            const parsed = JSON.parse(responseText);
+            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+                /**
+                 * 🧾 Формує рядки звіту з полів об'єкта та вкладених підрозділів.
+                 * @param {object} entries — поля об'єкта відповіді.
+                 * @param {string} [prefix=''] — назва батьківського поля.
+                 * @returns {string[]} Рядки з назвами полів і відформатованими значеннями.
+                 */
+                const renderEntries = (entries, prefix = '') => Object.entries(entries).flatMap(([key, value]) => {
+                    const label = prefix ? `${prefix} · ${key}` : key;
+                    if (value === null || value === undefined || value === '') return [];
+                    if (Array.isArray(value)) {
+                        return [`<b>${escapeHtml(label)}:</b>\n${value.map(item => `• ${formatValue(item)}`).join('\n')}`];
+                    }
+                    if (typeof value === 'object') return renderEntries(value, label);
+                    return [`<b>${escapeHtml(label)}:</b> ${formatText(value)}`];
+                });
+
+                return renderEntries(parsed).join('\n');
+            }
+        } catch {
+            // 📝 Якщо JSON пошкоджений, показуємо відповідь як звичайний текст.
+        }
+    }
+
+    return formatText(responseText);
 }
 
 // --- ТЕЛЕГРАМ ВЕБХУК НАЛАШТУВАННЯ ---
 const WEBHOOK_PATH = `/telegram/${process.env.BOT_TOKEN}`;
+/**
+ * 📬 Передає оновлення Telegram до обробника бота.
+ * @param {object} req — запит із даними оновлення Telegram.
+ * @param {object} res — відповідь вебсервера.
+ * @returns {unknown} Результат передавання оновлення.
+ */
 app.post(WEBHOOK_PATH, (req, res) => {
     bot.handleUpdate(req.body, res);
 });
 
-// --- СТАТИСТИКА ТА РОЗРАХУНКИ ---
+// ==========================================
+// 📊 ХЕЛПЕРИ СТАТИСТИКИ ТА БАЛАНСУ
+// ==========================================
+/**
+ * 📊 Перераховує залишки, заощадження, борги й капітал за активними записами.
+ * Зняття зі збережень збільшує картку й на ту саму суму зменшує заощадження,
+ * тому загальний капітал від такого переказу не змінюється.
+ * @returns {Promise<object>} Сукупні показники особистих фінансів і проєктів.
+ */
 const getStatsData = async () => {
     const allTransactions = await prisma.transaction.findMany({ 
         where: { is_deleted: false }
@@ -175,7 +271,7 @@ const getStatsData = async () => {
     
     let initBalance = 0;
     let initSaving = 0;
-    let pIncome = 0, pExpense = 0, pSaving = 0, wIncome = 0, wExpense = 0;
+    let pIncome = 0, pExpense = 0, pSaving = 0, pWithdraw = 0, wIncome = 0, wExpense = 0;
     let iOweTotal = 0, payDebtTotal = 0; 
     let oweMeTotal = 0, getDebtTotal = 0; 
 
@@ -198,6 +294,10 @@ const getStatsData = async () => {
                 cashBalance -= t.amount;
                 cardBalance += t.amount;
             }
+        } else if (t.type === 'withdraw_saving') {
+            // 🏦 Це переказ із Банки на картку, а не витрата чи новий дохід.
+            pWithdraw += t.amount;
+            cardBalance += t.amount;
         } else if (t.workspace === 'Проєкт') {
             if (t.type === 'income') {
                 wIncome += t.amount;
@@ -241,8 +341,9 @@ const getStatsData = async () => {
     const currentIOwe = iOweTotal - payDebtTotal;
     const currentOweMe = oweMeTotal - getDebtTotal;
 
-    const totalSavings = initSaving + pSaving; 
-    // Загальний капітал = реальна картка + реальна готівка + банки/збереження
+    // 🏦 Віднімаємо зняту суму зі збережень після її зарахування на картку.
+    const totalSavings = initSaving + pSaving - pWithdraw;
+    // 💰 Капітал складається із залишку картки, готівки та збережень.
     const totalCapital = cardBalance + cashBalance + totalSavings; 
 
     return {
@@ -252,6 +353,11 @@ const getStatsData = async () => {
     };
 };
 
+/**
+ * 📊 Формує й надсилає користувачу поточну фінансову статистику.
+ * @param {object} ctx — контекст команди Telegram.
+ * @returns {Promise<void>} Завершується після надсилання статистики або повідомлення про помилку.
+ */
 const showStats = async (ctx) => {
     try {
         const stats = await getStatsData();
@@ -289,7 +395,14 @@ ${hasDebt ? `📉 <b>Виплата боргу:</b> ${debtProgressBar}` : ''}
     }
 };
 
-// --- КОМАНДИ БОТА ---
+// ==========================================
+// 💬 КОМАНДИ ТА КЕРУВАННЯ ФІНАНСАМИ
+// ==========================================
+/**
+ * 👋 Вітає користувача й підказує основні команди.
+ * @param {object} ctx — контекст запуску бота в Telegram.
+ * @returns {Promise<unknown>} Результат надсилання привітання.
+ */
 bot.start((ctx) => ctx.reply('Привіт! Бот активний. Введи /help для списку команд або /stats для перегляду балансу.'));
 
 const helpMessage = `
@@ -303,6 +416,7 @@ const helpMessage = `
 • /setbalance <code>&lt;сума&gt;</code> — Встановити початковий залишок (точка відліку на картці).
 • /sync <code>&lt;сума&gt;</code> — <b>Синхронізувати баланс</b>. Вирівнює баланс бота з реальною карткою.
 • /setsavings <code>&lt;сума&gt;</code> — Синхронізувати суму збережень (Банка/Готівка).
+• /withdraw <code>&lt;сума&gt;</code> — 🏦 <b>Зняти кошти зі збережень</b> (переказ з Банки на картку).
 
 🤝 <b>Модуль Боргів (Debt Tracker):</b>
 • /debt <code>&lt;сума&gt; &lt;ім'я&gt;</code> — Зафіксувати, що ти взяв у борг (Пасив).
@@ -320,10 +434,20 @@ const helpMessage = `
 • /help — ℹ️ Переглянути цей список команд.
 `;
 
+/**
+ * 📖 Надсилає довідку з доступними командами.
+ * @param {object} ctx — контекст команди Telegram.
+ * @returns {Promise<unknown>} Результат надсилання довідки.
+ */
 bot.command(['help', 'commands'], async (ctx) => {
     await ctx.replyWithHTML(helpMessage);
 });
 
+/**
+ * 💳 Замінює початковий залишок картки заданою сумою.
+ * @param {object} ctx — контекст команди та переданої суми.
+ * @returns {Promise<unknown>} Результат збереження початкового залишку.
+ */
 bot.command('setbalance', async (ctx) => {
     const args = ctx.message.text.split(' ');
     const amount = parseFloat(args[1]);
@@ -336,7 +460,12 @@ bot.command('setbalance', async (ctx) => {
     await ctx.reply(`✅ Початковий залишок успішно зафіксовано: ${amount} грн.`);
 });
 
-// --- ХЕЛПЕР СМАРТ-СИНХРОНІЗАЦІЇ (РЕКОНСИЛЯЦІЯ БАЛАНСУ) ---
+/**
+ * 🔄 Зіставляє фактичний залишок картки з обліком і записує лише різницю.
+ * Початковий баланс не змінюється: розбіжність зберігається як дохід або витрата.
+ * @param {number} realAmount — фактична сума на картці.
+ * @returns {Promise<{synced: boolean, message: string}>} Стан звірки та повідомлення для користувача.
+ */
 async function processBalanceSync(realAmount) {
     const stats = await getStatsData();
     const diff = realAmount - stats.cardBalance;
@@ -352,7 +481,7 @@ async function processBalanceSync(realAmount) {
     const isExpenseCorrection = diff < 0;
     const absDiff = Math.abs(diff);
 
-    // Створюємо компенсуючу транзакцію замість зміни init_balance
+    // 🧾 Записуємо коригування окремо, не змінюючи початковий залишок.
     await prisma.transaction.create({
         data: {
             type: isExpenseCorrection ? 'expense' : 'income',
@@ -377,7 +506,11 @@ async function processBalanceSync(realAmount) {
 }
 
 
-// --- КОМАНДА /sync ---
+/**
+ * 🔄 Приймає фактичний залишок і запускає розумну звірку балансу.
+ * @param {object} ctx — контекст команди Telegram.
+ * @returns {Promise<unknown>} Результат звірки або підказка щодо формату.
+ */
 bot.command('sync', async (ctx) => {
     const args = ctx.message.text.split(' ');
     const realAmount = parseFloat(args[1]);
@@ -387,6 +520,11 @@ bot.command('sync', async (ctx) => {
     await ctx.replyWithHTML(result.message);
 });
 
+/**
+ * 🏦 Встановлює цільову суму збережень, коригуючи початковий запис.
+ * @param {object} ctx — контекст команди та нової суми збережень.
+ * @returns {Promise<unknown>} Результат оновлення суми.
+ */
 bot.command('setsavings', async (ctx) => {
     const args = ctx.message.text.split(' ');
     const targetAmount = parseFloat(args[1]);
@@ -416,7 +554,45 @@ bot.command('setsavings', async (ctx) => {
     await ctx.reply(`✅ Збереження успішно синхронізовано! Тепер у скарбничці: ${targetAmount} грн.`);
 });
 
-// БЕЗПЕЧНЕ СКИДАННЯ БАЗИ (2FA Reset) ---
+/**
+ * 🏦 Записує переказ зі збережень на картку без оформлення його як витрати.
+ * @param {object} ctx — контекст команди, суми та необов'язкового опису.
+ * @returns {Promise<unknown>} Результат запису переказу або підказка щодо формату.
+ */
+bot.command(['withdraw', 'withdrawsavings'], async (ctx) => {
+    const args = ctx.message.text.trim().split(/\s+/);
+    const amount = Number.parseFloat(args[1]);
+    if (!Number.isFinite(amount) || amount <= 0) {
+        return ctx.replyWithHTML('⚠️ Формат: <code>/withdraw &lt;сума&gt; [опис]</code>. Наприклад: <code>/withdraw 500 На картку</code>');
+    }
+
+    const description = args.slice(2).join(' ') || 'Зняття коштів зі збережень';
+    await prisma.transaction.create({
+        data: {
+            type: 'withdraw_saving',
+            amount,
+            source: 'card',
+            category: 'Зняття зі збережень',
+            description,
+            workspace: 'Особисте'
+        }
+    });
+
+    await ctx.replyWithHTML(
+        `🏦 <b>Кошти переведено зі збережень на картку</b>\n` +
+        `💵 <b>Сума:</b> <code>${amount.toFixed(2)}</code> грн\n` +
+        `📝 <b>Опис:</b> <i>${escapeHtml(description)}</i>`
+    );
+});
+
+// ==========================================
+// 🔐 ПІДТВЕРДЖЕННЯ ОЧИЩЕННЯ ДАНИХ
+// ==========================================
+/**
+ * ⚠️ Запускає двоетапне підтвердження повного очищення даних.
+ * @param {object} ctx — контекст команди Telegram.
+ * @returns {Promise<unknown>} Результат показу кнопок підтвердження.
+ */
 bot.command('reset', async (ctx) => {
     const userId = ctx.from.id;
     delete userStates[userId];
@@ -432,6 +608,11 @@ bot.command('reset', async (ctx) => {
     });
 });
 
+/**
+ * 🔐 Вмикає очікування контрольної фрази для остаточного очищення даних.
+ * @param {object} ctx — контекст натискання кнопки підтвердження.
+ * @returns {Promise<unknown>} Результат переходу до другого кроку підтвердження.
+ */
 bot.action('start_reset_confirm', async (ctx) => {
     await ctx.answerCbQuery();
     const userId = ctx.from.id;
@@ -445,6 +626,11 @@ bot.action('start_reset_confirm', async (ctx) => {
     );
 });
 
+/**
+ * ↩️ Скасовує підтвердження очищення та прибирає відповідний стан користувача.
+ * @param {object} ctx — контекст натискання кнопки скасування.
+ * @returns {Promise<unknown>} Результат оновлення повідомлення.
+ */
 bot.action('cancel_reset', async (ctx) => {
     await ctx.answerCbQuery();
     const userId = ctx.from.id;
@@ -453,6 +639,11 @@ bot.action('cancel_reset', async (ctx) => {
     await ctx.editMessageText('🛑 <b>Операцію з очищення даних скасовано.</b> Усі фінанси в безпеці.', { parse_mode: 'HTML' });
 });
 
+/**
+ * 🤝 Записує новий борг користувача перед іншою особою.
+ * @param {object} ctx — контекст команди із сумою та іменем позикодавця.
+ * @returns {Promise<unknown>} Результат збереження боргу.
+ */
 bot.command('debt', async (ctx) => {
     const text = ctx.message.text.replace('/debt', '').trim();
     const parts = text.split(' ');
@@ -463,6 +654,11 @@ bot.command('debt', async (ctx) => {
     await ctx.reply(`🤝 Зафіксовано пасив: ти винен ${amount} грн (${name}).`);
 });
 
+/**
+ * 🤝 Записує суму, яку інша особа винна користувачу.
+ * @param {object} ctx — контекст команди із сумою та іменем позичальника.
+ * @returns {Promise<unknown>} Результат збереження боргового активу.
+ */
 bot.command('lend', async (ctx) => {
     const text = ctx.message.text.replace('/lend', '').trim();
     const parts = text.split(' ');
@@ -473,6 +669,11 @@ bot.command('lend', async (ctx) => {
     await ctx.reply(`🤝 Зафіксовано актив (витрата з залишку): тобі винні ${amount} грн (${name}).`);
 });
 
+/**
+ * 💸 Записує погашення частини або всього боргу користувача.
+ * @param {object} ctx — контекст команди із сумою погашення.
+ * @returns {Promise<unknown>} Результат запису погашення.
+ */
 bot.command('paydebt', async (ctx) => {
     const amount = parseFloat(ctx.message.text.replace('/paydebt', '').trim());
     if (isNaN(amount)) return ctx.reply('Формат: /paydebt <сума>. Наприклад: /paydebt 5000');
@@ -480,6 +681,11 @@ bot.command('paydebt', async (ctx) => {
     await ctx.reply(`💸 Записано: ти погасив ${amount} грн свого боргу. Залишок на картці зменшено.`);
 });
 
+/**
+ * 📥 Записує повернення боргу, який інша особа мала перед користувачем.
+ * @param {object} ctx — контекст команди із сумою повернення.
+ * @returns {Promise<unknown>} Результат запису повернення.
+ */
 bot.command('getdebt', async (ctx) => {
     const amount = parseFloat(ctx.message.text.replace('/getdebt', '').trim());
     if (isNaN(amount)) return ctx.reply('Формат: /getdebt <сума>. Наприклад: /getdebt 2000');
@@ -489,7 +695,11 @@ bot.command('getdebt', async (ctx) => {
 
 bot.command('stats', showStats);
 
-// --- КОМАНДА /undo (Smart Batch Soft Delete) ---
+/**
+ * ↩️ Позначає останній активний запис видаленим або скасовує весь його пакет.
+ * @param {object} ctx — контекст команди Telegram.
+ * @returns {Promise<unknown>} Підтвердження скасування або повідомлення про помилку.
+ */
 bot.command('undo', async (ctx) => {
     try {
         // 1. Знаходимо останню АКТИВНУ транзакцію
@@ -502,7 +712,7 @@ bot.command('undo', async (ctx) => {
             return ctx.reply('❌ Немає активних транзакцій для скасування.');
         }
 
-        // 2. Якщо є batchId — скасовуємо весь пакет, інакше тільки її одну
+        // 2. Якщо є ідентифікатор пакета — скасовуємо його повністю, інакше лише цей запис.
         if (lastTx.batchId) {
             const batchTxs = await prisma.transaction.findMany({
                 where: { batchId: lastTx.batchId, is_deleted: false }
@@ -548,8 +758,15 @@ bot.command('undo', async (ctx) => {
     }
 });
 
-// 3.1. КОМАНДИ АКТИВВАЦІЇ ТА ДЕАКТИВАЦІЇ AI-РАДНИКА
-// Допоміжна функція для виходу з режиму порадника
+// ==========================================
+// 🤖 РЕЖИМ ПОРАДНИКА ТА ОБРОБКА ПОВІДОМЛЕНЬ
+// ==========================================
+/**
+ * 🚪 Завершує режим порадника та повертає користувача до обліку фінансів.
+ * @param {object} ctx — контекст поточної розмови.
+ * @param {boolean} [isTimeout=false] — чи завершено режим через бездіяльність.
+ * @returns {Promise<unknown>} Результат надсилання повідомлення про завершення.
+ */
 async function exitAdviceMode(ctx, isTimeout = false) {
     const userId = ctx.from.id;
     if (userStates[userId]) {
@@ -564,7 +781,11 @@ async function exitAdviceMode(ctx, isTimeout = false) {
     await ctx.replyWithHTML(msg);
 }
 
-// Вхід у режим порадника (/advice, /advisor, /ask)
+/**
+ * 🎩 Вмикає розмовний режим, у якому звичайні повідомлення не записуються як операції.
+ * @param {object} ctx — контекст команди Telegram.
+ * @returns {Promise<unknown>} Результат надсилання привітання та кнопок.
+ */
 bot.command(['advice', 'advisor', 'ask'], async (ctx) => {
     const userId = ctx.from.id;
     
@@ -592,18 +813,30 @@ bot.command(['advice', 'advisor', 'ask'], async (ctx) => {
     ]));
 });
 
-// Вихід з режиму порадника (/endadvice, /exit, /stop, /off)
+/**
+ * 🚪 Вимикає режим порадника за однією з команд завершення.
+ * @param {object} ctx — контекст команди Telegram.
+ * @returns {Promise<unknown>} Результат завершення режиму.
+ */
 bot.command(['endadvice', 'exit', 'stop', 'off'], async (ctx) => {
     await exitAdviceMode(ctx, false);
 });
 
-// Обробка натискання кнопки "🛑 Завершити консультацію"
+/**
+ * 🛑 Завершує консультацію після натискання відповідної кнопки.
+ * @param {object} ctx — контекст натискання кнопки.
+ * @returns {Promise<unknown>} Результат підтвердження натискання та завершення режиму.
+ */
 bot.action('exit_advice', async (ctx) => {
     await ctx.answerCbQuery();
     await exitAdviceMode(ctx, false);
 });
 
-// Обробка натискань на Quick Prompts
+/**
+ * 💡 Надсилає один із підготовлених запитів для початку консультації.
+ * @param {object} ctx — контекст кнопки та вибраного варіанта.
+ * @returns {Promise<unknown>} Результат надсилання підказки.
+ */
 bot.action(/^prompt_(plan|debts|eval)$/, async (ctx) => {
     await ctx.answerCbQuery();
     const type = ctx.match[1];
@@ -616,7 +849,12 @@ bot.action(/^prompt_(plan|debts|eval)$/, async (ctx) => {
     await ctx.reply(`✍️ ${promptText}`);
 });
 
-// --- РУЧНЕ ДОДАВАННЯ ТРАНЗАКЦІЇ /add ---
+/**
+ * ➕ Додає операцію вручну, а ШІ визначає її тип, категорію та простір.
+ * Якщо класифікація не вдається, записує витрату до загальної категорії.
+ * @param {object} ctx — контекст команди із сумою та описом операції.
+ * @returns {Promise<unknown>} Результат збереження й підтвердження операції.
+ */
 bot.command('add', async (ctx) => {
     const userId = ctx.from.id;
     delete userStates[userId];
@@ -680,9 +918,17 @@ bot.command('add', async (ctx) => {
     }
 });
 
-// --- ФУНКЦІЇ ПАМ'ЯТІ ЧАТУ ---
+// ==========================================
+// 💬 ІСТОРІЯ РОЗМОВИ ТА УТОЧНЕННЯ ОПЕРАЦІЙ
+// ==========================================
 
-// 1. Збереження повідомлення в базу
+/**
+ * 💾 Зберігає повідомлення розмови для подальшого контексту порадника.
+ * @param {number|string|bigint} userId — ідентифікатор користувача.
+ * @param {string} role — роль автора повідомлення.
+ * @param {string} text — текст повідомлення.
+ * @returns {Promise<void>} Завершується після запису або фіксації помилки.
+ */
 async function saveChatMessage(userId, role, text) {
     try {
         await prisma.chatHistory.create({
@@ -697,7 +943,11 @@ async function saveChatMessage(userId, role, text) {
     }    
 }
 
-// 2. Зчитування останніх 10 повідомлень у форматі Gemini SDK
+/**
+ * 📚 Завантажує останні десять повідомлень і приводить їх до формату історії Gemini.
+ * @param {number|string|bigint} userId — ідентифікатор користувача.
+ * @returns {Promise<Array<{role: string, parts: Array<{text: string}>}>>} Історія у хронологічному порядку.
+ */
 async function getChatHistory(userId) {
     try {
         const history = await prisma.chatHistory.findMany({
@@ -722,7 +972,11 @@ async function getChatHistory(userId) {
     }
 }
 
-// --- ОБРОБКА КНОПКИ "ОЧИСТИТИ ІСТОРІЮ" ---
+/**
+ * 🧹 Пояснює, як очистити видимий екран чату, не видаляючи фінансові записи.
+ * @param {object} ctx — контекст вибраної кнопки.
+ * @returns {Promise<unknown>} Результат надсилання пояснення.
+ */
 bot.hears('🧹 Очистити історію', async (ctx) => {
     const reminder = 
 `💡 <b>Щоб візуально очистити екран чату:</b>
@@ -734,9 +988,13 @@ bot.hears('🧹 Очистити історію', async (ctx) => {
     await ctx.replyWithHTML(reminder);
 })
 
-// --- ОБРОБКА КНОПКИ "УТОЧНИТИ" ---
+/**
+ * ✏️ Переводить вибрану операцію в режим уточнення її опису й категорії.
+ * @param {object} ctx — контекст кнопки з ідентифікатором операції.
+ * @returns {Promise<unknown>} Результат збереження стану редагування.
+ */
 bot.action(/^edit_(\d+)$/, async (ctx) => {
-    //1. Зупиняємо анімацію завантаження на кнопці в Telegram
+    // 1. Зупиняємо анімацію завантаження на кнопці в Телеграмі.
     await ctx.answerCbQuery();
 
     const txId = parseInt(ctx.match[1], 10);
@@ -751,7 +1009,16 @@ bot.action(/^edit_(\d+)$/, async (ctx) => {
     await ctx.reply('✍️ Вкажи уточнення для цієї транзакції (наприклад: <i>"Одяг, купив куртку"</i>):', { parse_mode: 'HTML' });
 });
 
-// --- ЄДИНА ФУНКЦІЯ ФОРМУВАННЯ ТА ВІДПРАВКИ МІСЯЧНОГО АУДИТУ (DRY) ---
+// ==========================================
+// 📅 МІСЯЧНИЙ АУДИТ ТА ЕКСПОРТ ДАНИХ
+// ==========================================
+/**
+ * 📊 Збирає місячні показники, формує аудит і надсилає звіт у Telegram.
+ * Для автоматичного запуску додає окремий заголовок і не надсилає повідомлення очікування.
+ * @param {number|string} chatId — ідентифікатор чату для звіту.
+ * @param {boolean} [isAuto=false] — чи сформовано звіт автоматично за розкладом.
+ * @returns {Promise<void>} Завершується після надсилання аудиту або повідомлення про помилку.
+ */
 async function runAndSendMonthlyAudit(chatId, isAuto = false) {
     let loadingMsg = null;
     if (!isAuto) {
@@ -845,12 +1112,20 @@ async function runAndSendMonthlyAudit(chatId, isAuto = false) {
     }
 }
 
-// --- КОМАНДА /monthly (Ручний виклик) ---
+/**
+ * 📅 Запускає місячний аудит за запитом користувача.
+ * @param {object} ctx — контекст команди Telegram.
+ * @returns {Promise<void>} Завершується після формування та надсилання аудиту.
+ */
 bot.command('monthly', async (ctx) => {
     await runAndSendMonthlyAudit(ctx.chat.id, false);
 });
 
-// --- КОМАНДА /export (Експорт в CSV) ---
+/**
+ * 📥 Формує й надсилає файл з усіма операціями або записами поточного місяця.
+ * @param {object} ctx — контекст команди та необов'язкового вибору періоду.
+ * @returns {Promise<void>} Завершується після надсилання файлу або повідомлення про помилку.
+ */
 bot.command('export', async (ctx) => {
     const args = ctx.message.text.split(' ');
     const isMonthOnly = args[1]?.toLowerCase() === 'month';
@@ -890,7 +1165,15 @@ bot.command('export', async (ctx) => {
     }
 });
 
-// --- ХЕНДЛЕР СПІЛКУВАННЯ З AI-РАДНИКОМ (Таска 3.2) ---
+// ==========================================
+// 🤖 ПРОВАЙДЕРИ ШІ ТА РАДНИК
+// ==========================================
+/**
+ * 🎩 Формує контекст фінансів, передає історію розмови раднику та зберігає відповідь.
+ * @param {object} ctx — контекст чату Telegram.
+ * @param {string} userText — повідомлення користувача для радника.
+ * @returns {Promise<void>} Завершується після відповіді або повідомлення про помилку.
+ */
 async function handleAdvisorChat(ctx, userText) {
     const userId = ctx.from.id;
     const waitMsg = await ctx.reply('⏳ Аналізую ваші фінанси...');
@@ -900,7 +1183,7 @@ async function handleAdvisorChat(ctx, userText) {
         let rawHistory = await getChatHistory(userId);
         let history = Array.isArray(rawHistory) ? rawHistory : [];
 
-        // Перевірка: масив має починатися з 'user' для Gemini SDK
+        // 🧩 Історія для Gemini має починатися з повідомлення користувача.
         while (history.length > 0 && history[0].role !== 'user') {
             history.shift();
         }
@@ -922,7 +1205,7 @@ async function handleAdvisorChat(ctx, userText) {
 
         const adviceResult = await generateChatTextWithFallback(systemInstruction, history, userText);
 
-        // Безпечно обробляємо відповідь
+        // 🛡️ Екрануємо відповідь і прибираємо зайву розмітку перед показом.
         const safeResponse = cleanAiResponse(adviceResult.text);
 
         await ctx.telegram.deleteMessage(ctx.chat.id, waitMsg.message_id);
@@ -942,18 +1225,23 @@ async function handleAdvisorChat(ctx, userText) {
     }
 }
 
-// --- ОБРОБКА ТЕКСТОВИХ ПОВІДОМЛЕНЬ ТА РАДНИКА AI З ПАМ'ЯТЮ ---
+/**
+ * 📨 Розбирає текстові повідомлення: стани користувача, наміри, операції та розмову.
+ * Команди пропускаються окремим обробникам; звичайний текст класифікується ШІ.
+ * @param {object} ctx — контекст текстового повідомлення Telegram.
+ * @returns {Promise<unknown>} Результат відповідного сценарію обробки повідомлення.
+ */
 bot.on('text', async (ctx) => {
     const userId = ctx.from.id;
     const userText = ctx.message.text;
 
-    // ЗАХИСТ: Якщо це команда, скасовуємо будь-яке редагування і виходимо
+    // 🛡️ Команди обробляються окремими гілками; очищаємо незавершене уточнення.
     if (userText.startsWith('/')) {
         delete userStates[userId];
         return;
     }
 
-    // 🌟 1. РЕЖИМ AI-РАДНИКА + АВТО-ТАЙМАУТ (20 хвилин)
+    // 🌟 1. Режим радника завершується після двадцяти хвилин бездіяльності.
     if (userStates[userId]?.isAdviceMode) {
         const lowerText = userText.trim().toLowerCase();
 
@@ -978,7 +1266,7 @@ bot.on('text', async (ctx) => {
         }
     }
 
-    // 2. СТАН: Підтвердження скидання даних (2FA Reset)
+    // 🔐 2. Стан двоетапного підтвердження очищення даних.
     if (userStates[userId] && userStates[userId].awaitingResetConfirm) {
         if (userText.trim() === 'ОЧИСТИТИ ДАНІ') {
             delete userStates[userId];
@@ -1062,16 +1350,16 @@ bot.on('text', async (ctx) => {
         }
     }
 
-    // 4. AI-РОУТЕР: Автоматична перевірка на транзакцію у звичайному тексті
+    // 🤖 4. Визначаємо намір звичайного текстового повідомлення.
     const intentData = await classifyUserIntent(userText);
 
-    // 4.1. Обробка безшовного наміру SYNC
+    // 🔄 4.1. Якщо вказано фактичний залишок, запускаємо звірку балансу.
     if (intentData && intentData.intent === 'SYNC' && typeof intentData.amount === 'number') {
         const syncResult = await processBalanceSync(intentData.amount);
         return await ctx.replyWithHTML(syncResult.message);
     }
 
-    // 4.2. Обробка TRANSACTION (одинарні та пакетні Multi-Transaction)
+    // 🧾 4.2. Записуємо одну операцію або пов'язаний пакет операцій.
     if (intentData && intentData.isTransaction && Array.isArray(intentData.transactions) && intentData.transactions.length > 0) {
         const batchId = intentData.transactions.length > 1 ? crypto.randomUUID() : null;
         const createdTxList = [];
@@ -1095,9 +1383,10 @@ bot.on('text', async (ctx) => {
         if (createdTxList.length === 1) {
             // Одинарна транзакція
             const tx = createdTxList[0];
-            const icon = tx.type === 'income' ? '🟢' : tx.type === 'transfer' ? '🔁' : '🔴';
+            const icon = tx.type === 'income' ? '🟢' : tx.type === 'transfer' ? '🔁' : tx.type === 'withdraw_saving' ? '🏦' : '🔴';
             const sourceInfo = tx.type === 'transfer' 
                 ? ` (${tx.source === 'card' ? '💳' : '💵'} ➔ ${tx.toSource === 'cash' ? '💵' : '💳'})`
+                : tx.type === 'withdraw_saving' ? ' (🏦 Банка ➔ 💳 Картка)'
                 : ` (${tx.source === 'cash' ? '💵 Готівка' : '💳 Картка'})`;
 
             return await ctx.replyWithHTML(
@@ -1109,7 +1398,7 @@ bot.on('text', async (ctx) => {
                 Markup.inlineKeyboard([[Markup.button.callback('✏️ Уточнити', `edit_${tx.id}`)]])
             );
         } else {
-            // Пакетна транзакція (Multi-Transaction)
+            // 📦 Показуємо підсумок пакета операцій.
             let msg = `📦 <b>ПАКЕТНО ОБРОБЛЕНО (${createdTxList.length} ОПЕРАЦІЙ)</b>\n━━━━━━━━━━━━━━━━━━━\n`;
             createdTxList.forEach((tx, idx) => {
                 const icon = tx.type === 'income' ? '🟢' : tx.type === 'transfer' ? '🔁' : '🔴';
@@ -1121,14 +1410,22 @@ bot.on('text', async (ctx) => {
         }
     }
 
-    // 🌟 5. ЯКЩО МОВА/ПИТАННЯ ТА НАМІР = "CHAT":
-    // Перенаправляємо обробку прямо в єдину функцію AI-Радника!
+    // 🌟 5. Запитання й звичайну розмову передаємо фінансовому раднику.
     return await handleAdvisorChat(ctx, userText);
 });
 
-// --- ВЕБХУК МОНОБАНКУ (З ЖОРСТКИМ ФІЛЬТРОМ ТА АТОМАРНІСТЮ) ---
+// ==========================================
+// 🏦 ВЕБХУКИ (MONOBANK ТА TELEGRAM)
+// ==========================================
+/**
+ * 🏦 Перевіряє вебхук Monobank, відсікає дублікати й записує операцію.
+ * Зняття готівки та банківська комісія зберігаються атомарно як переказ і витрата.
+ * @param {object} req — запит із підписаним шляхом і даними виписки Monobank.
+ * @param {object} res — відповідь вебсервера для Monobank.
+ * @returns {Promise<unknown>} Підтвердження прийняття або відхилення вебхука.
+ */
 app.post('/monobank/:secret', async (req, res) => {
-    // 🛡 ЗАХИСТ: Перевірка секретного токена з URL
+    // 🛡️ Перевіряємо секретний ключ у шляху запиту.
     const incomingSecret = req.params.secret;
     const expectedSecret = process.env.MONO_SECRET;
 
@@ -1158,7 +1455,7 @@ app.post('/monobank/:secret', async (req, res) => {
     }
 
     try {
-        // 🔄 Смарт-реконнект до Supabase
+        // 🔄 Відновлюємо з'єднання з базою перед обробкою виписки.
         await prisma.$connect().catch(() => {});
 
         // 🛑 Перевірка на наявність дубля
@@ -1180,14 +1477,16 @@ app.post('/monobank/:secret', async (req, res) => {
             return res.status(200).send('OK');
         }
 
-        // ДЕТЕКТОР ЗНЯТТЯ ГОТІВКИ (Спліт без AI)
+        // 🏧 Визначаємо зняття готівки, щоб записати переказ окремо від комісії.
         const isCashWithdrawal = lowerDesc.includes('зняття готівки') || 
                                  lowerDesc.includes('банкомат') || 
                                  item.mcc === 6011;
 
         if (isCashWithdrawal) {
+            // 💸 Чиста сума переходить у готівку; комісія лишається окремою витратою.
             const cleanAmount = amount - commission; 
 
+            // 🔒 Обидва записи створюються разом: збій будь-якого скасує всю операцію.
             const savedTx = await prisma.$transaction(async (tx) => {
                 const withdrawal = await tx.transaction.create({
                     data: {
@@ -1234,7 +1533,7 @@ app.post('/monobank/:secret', async (req, res) => {
             return res.status(200).send('OK');
         }
 
-        // ЗВИЧАЙНІ ТРАНЗАКЦІЇ (Захищений виклик AI)
+        // 🤖 Для звичайної операції класифікуємо тип і категорію за описом.
         let aiData = { type: isIncome ? 'income' : 'expense', category: 'Загальне', workspace: 'Особисте' };
 
         try {
@@ -1300,13 +1599,24 @@ app.post('/monobank/:secret', async (req, res) => {
     }
 });
 
-// --- СТАРТ СЕРВЕРА ТА РЕЄСТРАЦІЯ ВЕБХУКУ ---
+// ==========================================
+// 🌐 ЗАПУСК ВЕБСЕРВЕРА ТА ПЕРЕВІРКА ДОСТУПНОСТІ
+// ==========================================
 const PORT = process.env.PORT || 3000;
+/**
+ * 💚 Повертає коротку відповідь для перевірки доступності сервера.
+ * @param {object} req — вхідний запит перевірки.
+ * @param {object} res — відповідь вебсервера.
+ * @returns {object} Відповідь зі станом успішної роботи.
+ */
 app.get('/ping', (req, res) => {
     res.status(200).send('OK');
 });
 
-// --- ФУНКЦІЯ ЗБОРУ ДЕННОЇ СТАТИСТИКИ ---
+/**
+ * 📊 Підсумовує доходи й витрати за сьогодні та додає загальні залишки.
+ * @returns {Promise<{dayIncome: number, dayExpense: number, categoryExpenses: object, realBalance: number, totalCapital: number}>} Дані денного звіту.
+ */
 async function getDailyReportData() {
     const startOfDay = new Date();
     startOfDay.setHours(0, 0, 0, 0);
@@ -1338,7 +1648,7 @@ async function getDailyReportData() {
         }
     });
 
-    // 2. Викликаємо існуючу функцію getStatsData() для загальних залишків
+    // 2. Додаємо до денних сум загальні залишки та капітал.
     const globalStats = await getStatsData();
 
     return {
@@ -1350,7 +1660,11 @@ async function getDailyReportData() {
     };
 }
     
-// --- ДОПОМІЖНА ФУНКЦІЯ ГЕНЕРАЦІЇ АНАЛІЗУ (З ПОВЕРНЕННЯМ ПРОВАЙДЕРА ТА СТАРИМ ПРОМПТОМ) ---
+/**
+ * 🤖 Формує короткий аналіз дня, зіставляючи витрати із середнім за сім днів.
+ * @param {object} dailyData — доходи, витрати, категорії та залишки за день.
+ * @returns {Promise<{text: string, provider: string}>} Відповідь аналізу та назва провайдера.
+ */
 async function generateDailyAiAnalysis(dailyData) {
     // 1. Отримуємо транзакції за останні 7 днів для порівняння з середнім чеком
     const sevenDaysAgo = new Date();
@@ -1396,7 +1710,13 @@ async function generateDailyAiAnalysis(dailyData) {
     return result; // Повертає { text, provider }
 }
 
-// Автоматичний щомісячний аудит (останній день місяця о 23:55)
+// ==========================================
+// ⏰ ЗАВДАННЯ ЗА РОЗКЛАДОМ ТА ЩОДЕННІ ЗВІТИ
+// ==========================================
+/**
+ * 📅 Наприкінці останнього дня місяця запускає автоматичний аудит.
+ * @returns {Promise<void>} Завершується після запуску аудиту, якщо сьогодні кінець місяця.
+ */
 cron.schedule('55 23 28-31 * *', async () => {
     const now = new Date();
     const tomorrow = new Date(now);
@@ -1410,7 +1730,10 @@ cron.schedule('55 23 28-31 * *', async () => {
     timezone: "Europe/Kyiv"
 });
 
-// --- 1. АВТОМАТИЧНИЙ ЩОДЕННИЙ ЗВІТ (23:54) ---
+/**
+ * 🌙 Формує та надсилає щоденний звіт; за недоступності ШІ ставить аналіз у чергу.
+ * @returns {Promise<void>} Завершується після надсилання звіту або запису завдання в чергу.
+ */
 cron.schedule('54 23 * * *', async () => {
     try {
         const data = await getDailyReportData();
@@ -1432,14 +1755,14 @@ cron.schedule('54 23 * * *', async () => {
         let aiProvider = '';
 
         try {
-            // 1. Намагаємося згенерувати аналіз через AI з повторними спробами
+            // 🤖 Спершу пробуємо створити аналіз із повторними спробами.
             const aiRes = await generateDailyAiAnalysis(data);
             aiText = aiRes.text;
             aiProvider = aiRes.provider;
         } catch (aiError) {
             console.error('🚨 Обидва AI-сервіси (Gemini та Groq) недоступні після всіх спроб! Запис у PENDING...', aiError.message);
             
-            // 2. ФОЛБЕК: Додаємо у БД зі статусом PENDING
+            // 📥 Якщо обидва провайдери недоступні, відкладаємо аналіз у черзі.
             await prisma.reportQueue.create({
                 data: {
                     prompt: JSON.stringify(data),
@@ -1474,8 +1797,10 @@ ${aiProvider ? `\n🤖 <i>Згенеровано за допомогою: ${aiPr
     timezone: "Europe/Kyiv"
 });
 
-// --- 2. POLLING-КРОН ("Нічний санітар") ---
-// Запускається кожні 30 хвилин для розбору накопичених PENDING задач
+/**
+ * 🔄 Раз на пів години повторно обробляє відкладені денні звіти.
+ * @returns {Promise<void>} Завершується після перевірки всіх очікуваних завдань.
+ */
 cron.schedule('*/30 * * * *', async () => {
     try {
         const pendingReports = await prisma.reportQueue.findMany({
@@ -1488,7 +1813,7 @@ cron.schedule('*/30 * * * *', async () => {
             try {
                 const dailyData = JSON.parse(report.prompt);
                 
-                // Пробуємо обробити
+                // 🤖 Повторно формуємо аналіз для збереженого звіту.
                 const aiRes = await generateDailyAiAnalysis(dailyData);
 
                 const reportMessage = 
@@ -1502,7 +1827,7 @@ ${cleanAiResponse(aiRes.text)}
                 await bot.telegram.sendMessage(process.env.MY_CHAT_ID, reportMessage, { parse_mode: 'HTML' });
                 await saveChatMessage(process.env.MY_CHAT_ID, 'model', reportMessage);
 
-                // Тільки при УСПІХУ змінюємо статус на DONE
+                // ✅ Позначаємо завдання виконаним лише після надсилання звіту.
                 await prisma.reportQueue.update({
                     where: { id: report.id },
                     data: { status: 'DONE' }
@@ -1519,19 +1844,23 @@ ${cleanAiResponse(aiRes.text)}
     timezone: "Europe/Kyiv"
 });
 
+/**
+ * 🚀 Запускає сервер, налаштовує меню команд і за потреби реєструє вебхук.
+ * @returns {Promise<void>} Завершується після початкового налаштування бота.
+ */
 app.listen(PORT, async () => {
-    // ПОВЕРНУТО: Реєстрація меню підказок в самому Telegram
-    // Реєстрація меню команд ТІЛЬКИ для тебе (конкретного chat_id)
+    // 📋 Налаштовуємо меню команд лише для дозволеного чату.
     try {
         const allowedUserId = Number(process.env.MY_CHAT_ID);
 
-        // 1. Очищаємо дефолтне меню для всіх чужинців
+        // 🧹 Прибираємо загальнодоступний список команд.
         await bot.telegram.setMyCommands([]);
 
-        // 2. Встановлюємо список команд ТІЛЬКИ для твого ID
+        // 🔐 Показуємо команди лише власнику бота.
         await bot.telegram.setMyCommands([
             { command: 'stats', description: '📊 Фінансова статистика' },
             { command: 'sync', description: '🔄 Синхронізувати баланс з карткою' },
+            { command: 'withdraw', description: '🏦 Зняти кошти зі збережень (з Банки на картку)' },
             { command: 'undo', description: '🔄 Скасувати останню операцію (Ctrl+Z)' },
             { command: 'advice', description: '🎩 Режим AI-Радника (планування та поради)' },
             { command: 'monthly', description: '🔥 Глибокий AI-аудит за місяць' },
@@ -1559,7 +1888,10 @@ app.listen(PORT, async () => {
     }
 });
 
-// --- КРОН 4. Автоматичний щотижневий бекап бази (неділя о 23:00) ---
+/**
+ * 💾 Щонеділі надсилає власнику повний архів активних фінансових записів.
+ * @returns {Promise<void>} Завершується після надсилання архіву або запису помилки.
+ */
 cron.schedule('0 23 * * 0', async () => {
     try {
         const { count, csvBuffer } = await createTransactionsCsv(false);
@@ -1588,7 +1920,12 @@ cron.schedule('0 23 * * 0', async () => {
     timezone: "Europe/Kyiv"
 });
 
-// --- AI-РОУТЕР/КЛАСИФІКАТОР НАМІРІВ ---
+/**
+ * 🧭 Визначає, чи є повідомлення операцією, звіркою балансу або розмовою.
+ * Для операцій повертає окремі записи, зокрема переміщення коштів між карткою та Банкою.
+ * @param {string} userText — текстове повідомлення користувача.
+ * @returns {Promise<object>} Розпізнаний намір і дані операції або безпечний намір розмови.
+ */
 async function classifyUserIntent(userText) {
     const prompt = `Ти — розумний класифікатор намірів для фінансового бота.
 Проаналізуй текст користувача: "${userText}".
@@ -1602,11 +1939,15 @@ async function classifyUserIntent(userText) {
 2. "TRANSACTION" — якщо в тексті є одна АБО КІЛЬКА фінансових дій/витрат/переказів/боргів.
 3. "CHAT" — якщо це запитання, розмова, аналіз ("привіт", "порадь куди вкласти").
 
+ПРАВИЛО ЗНЯТТЯ ЗІ ЗБЕРЕЖЕНЬ:
+- Фрази "зняв з банки", "розбив банку", "вивів зі збережень", "переказав з накопичень" означають type: "withdraw_saving".
+- Це переказ зі збережень на картку: не класифікуй його як витрату або дохід; category: "Зняття зі збережень", source: "card", workspace: "Особисте".
+
 ЯКЩО INTENT = "TRANSACTION":
 Поверни масив "transactions" з усіма фінансовими діями, розбитими на окремі об'єкти.
 Для КОЖНОЇ дії визнач:
 - amount: число
-- type: "expense" | "income" | "transfer" | "saving" | "i_owe" | "owe_me" | "pay_debt" | "get_debt"
+- type: "expense" | "income" | "transfer" | "saving" | "withdraw_saving" | "i_owe" | "owe_me" | "pay_debt" | "get_debt"
 - source: "card" | "cash"
 - toSource: "card" | "cash" | null
 - category: коротка категорія (1-2 слова українською мовою)

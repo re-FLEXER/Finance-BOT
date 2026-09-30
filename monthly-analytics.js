@@ -2,16 +2,18 @@ const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
 
 /**
- * 1. Утиліта для отримання часових проміжків
+ * 📅 Обчислює повні календарні межі поточного та попереднього місяців.
+ * Межі включають першу мить першого дня та останню мить останнього дня.
+ * @returns {{currentMonth: {start: Date, end: Date}, previousMonth: {start: Date, end: Date}}} Межі обох періодів.
  */
 function getMonthRanges() {
     const now = new Date();
 
-    // Поточний місяць
+    // 🗓️ Поточний період: від початку цього місяця до його останньої мілісекунди.
     const startOfCurrentMonth = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
     const endOfCurrentMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
 
-    // Попередній місяць
+    // 🗓️ Попередній період: повний календарний місяць перед поточним.
     const startOfPreviousMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1, 0, 0, 0, 0);
     const endOfPreviousMonth = new Date(now.getFullYear(), now.getMonth(), 0, 23, 59, 59, 999);
 
@@ -22,12 +24,15 @@ function getMonthRanges() {
 }
 
 /**
- * 2. Основна функція агрегації даних для /monthly
+ * 📊 Збирає показники поточного місяця, залишки, борги та динаміку категорій.
+ * Для кожної поточної категорії порівнює витрати з повним попереднім місяцем;
+ * isFirstMonth буде true, якщо за попередній період немає витратних категорій.
+ * @returns {Promise<{isFirstMonth: boolean, metrics: object, topCategories: Array<object>}>} Дані для місячного аудиту.
  */
 async function getMonthlyAnalyticsData() {
     const { currentMonth, previousMonth } = getMonthRanges();
 
-    // --- БАЗОВІ МЕТРИКИ ЗА ПОТОЧНИЙ МІСЯЦЬ ---
+    // 📊 Базові доходи, витрати та заощадження лише за поточний місяць.
     const [incomeAgg, expenseAgg, savingAgg] = await Promise.all([
         prisma.transaction.aggregate({
             _sum: { amount: true },
@@ -48,7 +53,7 @@ async function getMonthlyAnalyticsData() {
     const savings = savingAgg._sum.amount || 0;
     const delta = income - expense;
 
-    // --- БОРГИ (ПОТОЧНИЙ СТАН В БАЗІ) ---
+    // 🤝 Борги рахуються за всю історію, щоб показати актуальний залишок.
     const [iOweAgg, payDebtAgg, oweMeAgg, getDebtAgg] = await Promise.all([
         prisma.transaction.aggregate({ _sum: { amount: true }, where: { type: 'i_owe', is_deleted: false } }),
         prisma.transaction.aggregate({ _sum: { amount: true }, where: { type: 'pay_debt', is_deleted: false } }),
@@ -59,7 +64,7 @@ async function getMonthlyAnalyticsData() {
     const myDebt = (iOweAgg._sum.amount || 0) - (payDebtAgg._sum.amount || 0); // Скільки я винен
     const debtToMe = (oweMeAgg._sum.amount || 0) - (getDebtAgg._sum.amount || 0); // Скільки мені винні
 
-    // --- ПОТОЧНІ БАЛАНСИ (КАРТКА ТА КЕШ) ---
+    // 💳 Поточні залишки картки й готівки за всіма активними записами.
     const [cardInc, cardExp, cashInc, cashExp] = await Promise.all([
         prisma.transaction.aggregate({ _sum: { amount: true }, where: { type: 'income', source: 'card', is_deleted: false } }),
         prisma.transaction.aggregate({ _sum: { amount: true }, where: { type: 'expense', source: 'card', is_deleted: false } }),
@@ -71,7 +76,7 @@ async function getMonthlyAnalyticsData() {
     const cashBalance = (cashInc._sum.amount || 0) - (cashExp._sum.amount || 0);
     const totalCapital = cardBalance + cashBalance + savings;
 
-    // --- 3. ТОП-10 КАТЕГОРІЙ ЗА ПОТОЧНИЙ МІСЯЦЬ ---
+    // 🏆 Десять найбільших категорій витрат поточного місяця.
     const currentTopCategories = await prisma.transaction.groupBy({
         by: ['category'],
         _sum: { amount: true },
@@ -84,7 +89,7 @@ async function getMonthlyAnalyticsData() {
         take: 10
     });
 
-    // --- 4. КАТЕГОРІЇ ЗА МИНУЛИЙ МІСЯЦЬ ДЛЯ ТРЕНД-АНАЛІЗУ ---
+    // 📈 Витрати попереднього повного місяця для порівняння трендів.
     const previousTopCategories = await prisma.transaction.groupBy({
         by: ['category'],
         _sum: { amount: true },
@@ -95,13 +100,13 @@ async function getMonthlyAnalyticsData() {
         }
     });
 
-    // Мапимо минулий місяць у зручний об'єкт { CategoryName: Amount }
+    // 🗂️ Зводимо попередні суми за назвою категорії для швидкого зіставлення.
     const prevMap = {};
     previousTopCategories.forEach(item => {
         prevMap[item.category] = item._sum.amount || 0;
     });
 
-    // Формуємо фінальний ТОП-10 з обчисленою різницею (Trend Analysis)
+    // 📉 Додаємо до поточного рейтингу різницю та відсоток зміни проти минулого місяця.
     const topCategoriesWithTrend = currentTopCategories.map(item => {
         const catName = item.category;
         const currentAmount = item._sum.amount || 0;

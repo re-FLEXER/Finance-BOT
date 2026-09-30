@@ -3,21 +3,39 @@ const Groq = require('groq-sdk');
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+const GEMINI_REQUEST_OPTIONS = { timeout: 30000 };
 
+/**
+ * ⏳ Робить паузу перед наступною спробою запиту.
+ * @param {number} ms — тривалість паузи в мілісекундах.
+ * @returns {Promise<void>} Обіцянка, що виконується після завершення паузи.
+ */
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/**
+ * 🤖 Запитує структуровану відповідь у Gemini та за помилки перемикається на Groq.
+ * Санітар очищає обгортки розмітки й залишає зовнішній об'єкт JSON, якщо модель
+ * додала до нього сторонній текст.
+ * @param {string} prompt — текст запиту для обох ШІ-провайдерів.
+ * @returns {Promise<{text: string, provider: string}>} Очищена відповідь і назва провайдера.
+ */
 async function generateTextWithFallback(prompt) {
     let rawText;
     let providerName;
 
-    // 1. Спроба через Gemini (Основний канал)
+    // 🤖 Спочатку звертаємося до Gemini; помилку фіксуємо перед переходом на Groq.
     try {
-        const model = genAI.getGenerativeModel({ model: 'gemini-3.5-flash' });
+        const model = genAI.getGenerativeModel({ model: 'gemini-3.5-flash' }, GEMINI_REQUEST_OPTIONS);
         const result = await model.generateContent(prompt);
         rawText = result.response.text();
         providerName = 'Gemini (3.5 Flash)';
-    } catch {
-        // 2. Спроба через Groq (Резервний канал)
+    } catch (geminiErr) {
+        console.error('🚨 [AI FALLBACK] Помилка виклику Gemini (gemini-3.5-flash):', {
+            message: geminiErr.message,
+            status: geminiErr.status || geminiErr.statusCode || 'N/A',
+            stack: geminiErr.stack
+        });
+        // 🔁 Groq підхоплює запит, якщо Gemini недоступна або відхилила його.
         try {
             const chatCompletion = await groq.chat.completions.create({
                 messages: [
@@ -37,7 +55,7 @@ async function generateTextWithFallback(prompt) {
         }
     }
 
-    // 🛡 САНІТАР-ПАРСЕР
+    // 🧹 Прибираємо обгортки розмітки та виділяємо дані JSON для подальшого розбору.
     let cleanedText = rawText.trim()
         .replace(/```json/gi, '')
         .replace(/```/g, '');
@@ -55,6 +73,13 @@ async function generateTextWithFallback(prompt) {
     };
 }
 
+/**
+ * 💬 Веде розмову через Gemini та непомітно переходить на Groq у разі помилки.
+ * @param {string} systemInstruction — спільні настанови для розмови.
+ * @param {Array<{role: string, parts: Array<{text?: string}>}>} history — попередні повідомлення у форматі Gemini.
+ * @param {string} userText — поточне повідомлення користувача.
+ * @returns {Promise<{text: string, provider: string}>} Текст відповіді та назва провайдера.
+ */
 async function generateChatTextWithFallback(systemInstruction, history, userText) {
     let rawText;
     let providerName;
@@ -63,12 +88,17 @@ async function generateChatTextWithFallback(systemInstruction, history, userText
         const model = genAI.getGenerativeModel({
             model: 'gemini-3.5-flash',
             systemInstruction
-        });
+        }, GEMINI_REQUEST_OPTIONS);
         const chat = model.startChat({ history });
         const result = await chat.sendMessage(userText);
         rawText = result.response.text();
         providerName = 'Gemini (3.5 Flash)';
-    } catch {
+    } catch (geminiErr) {
+        console.error('🚨 [AI FALLBACK] Помилка виклику Gemini (gemini-3.5-flash):', {
+            message: geminiErr.message,
+            status: geminiErr.status || geminiErr.statusCode || 'N/A',
+            stack: geminiErr.stack
+        });
         try {
             const messages = [
                 { role: 'system', content: systemInstruction },
@@ -96,6 +126,14 @@ async function generateChatTextWithFallback(systemInstruction, history, userText
     };
 }
 
+/**
+ * 🔄 Повторює повний ланцюжок запитів до провайдерів після тимчасових збоїв.
+ * @param {string} prompt — текст запиту для ШІ-провайдерів.
+ * @param {number} [maxRetries=5] — найбільша кількість спроб.
+ * @param {number} [delayMs=12000] — пауза між спробами в мілісекундах.
+ * @returns {Promise<{text: string, provider: string}>} Перша успішна відповідь провайдера.
+ * @throws {Error} Якщо всі спроби завершилися невдало.
+ */
 async function generateTextWithRetry(prompt, maxRetries = 5, delayMs = 12000) {
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
