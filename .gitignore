@@ -1,14 +1,18 @@
-node_modules/
+# Секретні змінні оточення
 .env
-prisma/dev.db
+.env.*
+.env.local
 
-# Логи та системні файли
-*.log
-.DS_Store
-.idea/
-.vscode/
-
-# Архіви та бекапи
+# Бекапи та архіви
 *.zip
 *_BACKUP.zip
 backup_dump.json
+
+# Залежності та системні файли
+node_modules/
+npm-debug.log*
+.DS_Store
+
+# База даних (SQLite залишки)
+prisma/*.db
+prisma/*.db-journal

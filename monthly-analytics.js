@@ -1,5 +1,4 @@
-const { PrismaClient } = require('@prisma/client');
-const prisma = new PrismaClient();
+const { prisma, getStatsData } = require('./stats-engine');
 
 /**
  * 📅 Обчислює повні календарні межі поточного та попереднього місяців.
@@ -33,7 +32,7 @@ async function getMonthlyAnalyticsData() {
     const { currentMonth, previousMonth } = getMonthRanges();
 
     // 📊 Базові доходи, витрати та заощадження лише за поточний місяць.
-    const [incomeAgg, expenseAgg, savingAgg] = await Promise.all([
+    const [incomeAgg, expenseAgg, savingAgg, globalStats] = await Promise.all([
         prisma.transaction.aggregate({
             _sum: { amount: true },
             where: { type: 'income', is_deleted: false, createdAt: { gte: currentMonth.start, lte: currentMonth.end } }
@@ -45,7 +44,8 @@ async function getMonthlyAnalyticsData() {
         prisma.transaction.aggregate({
             _sum: { amount: true },
             where: { type: 'saving', is_deleted: false, createdAt: { gte: currentMonth.start, lte: currentMonth.end } }
-        })
+        }),
+        getStatsData()
     ]);
 
     const income = incomeAgg._sum.amount || 0;
@@ -64,17 +64,9 @@ async function getMonthlyAnalyticsData() {
     const myDebt = (iOweAgg._sum.amount || 0) - (payDebtAgg._sum.amount || 0); // Скільки я винен
     const debtToMe = (oweMeAgg._sum.amount || 0) - (getDebtAgg._sum.amount || 0); // Скільки мені винні
 
-    // 💳 Поточні залишки картки й готівки за всіма активними записами.
-    const [cardInc, cardExp, cashInc, cashExp] = await Promise.all([
-        prisma.transaction.aggregate({ _sum: { amount: true }, where: { type: 'income', source: 'card', is_deleted: false } }),
-        prisma.transaction.aggregate({ _sum: { amount: true }, where: { type: 'expense', source: 'card', is_deleted: false } }),
-        prisma.transaction.aggregate({ _sum: { amount: true }, where: { type: 'income', source: 'cash', is_deleted: false } }),
-        prisma.transaction.aggregate({ _sum: { amount: true }, where: { type: 'expense', source: 'cash', is_deleted: false } })
-    ]);
-
-    const cardBalance = (cardInc._sum.amount || 0) - (cardExp._sum.amount || 0);
-    const cashBalance = (cashInc._sum.amount || 0) - (cashExp._sum.amount || 0);
-    const totalCapital = cardBalance + cashBalance + savings;
+    const cardBalance = globalStats.personalBalance;
+    const cashBalance = globalStats.cashBalance;
+    const totalCapital = globalStats.totalCapital;
 
     // 🏆 Десять найбільших категорій витрат поточного місяця.
     const currentTopCategories = await prisma.transaction.groupBy({

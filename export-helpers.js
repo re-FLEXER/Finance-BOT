@@ -75,7 +75,20 @@ function generateCsvReport(transactions) {
     return '\uFEFF' + csvContent; // \uFEFF додає BOM для коректного відображення кирилиці в Excel
 }
 
+/**
+ * Формує повний JSON-дамп таблиць бази даних, зберігаючи всі передані поля.
+ * @param {{Transaction: Array, ChatHistory: Array, ReportQueue: Array}} tables — записи моделей Prisma.
+ * @returns {string} JSON-дамп у UTF-8-сумісному текстовому форматі.
+ */
+function generateDatabaseJsonBackup(tables) {
+    return JSON.stringify({
+        createdAt: new Date().toISOString(),
+        tables
+    }, (key, value) => typeof value === 'bigint' ? value.toString() : value, 2);
+}
+
 module.exports = {
     sanitizeForCsv,
-    generateCsvReport
+    generateCsvReport,
+    generateDatabaseJsonBackup
 };

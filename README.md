@@ -1,4 +1,4 @@
-# Financial Telegram Bot + AI + Monobank (`v4.5 RELEASE`)
+# Financial Telegram Bot + AI + Monobank (v4.6 Hardening Release)
 
 Приватний фінансовий бот у Telegram для обліку доходів, витрат, заощаджень і боргів. Він приймає операції з повідомлень та Monobank, зберігає їх у PostgreSQL і формує звіти за допомогою ШІ.
 
@@ -26,12 +26,16 @@ flowchart TD
         AI_Module["🤖 Модуль ШІ з автоматичним перемиканням"]
         Gemini["🟢 Gemini 3.5 Flash: основний"]
         Groq["🟠 Groq GPT-OSS-120B: резервний"]
+        SaveFirst["💾 Базовий запис транзакції"]
+        AsyncAI["⚡ setImmediate: AI-класифікація"]
+        Notify["✏️ Оновлення запису та повідомлення"]
     end
 
     %% ЗБЕРІГАННЯ ДАНИХ
     subgraph STORAGE["🗄️ 4. Збереження"]
         Prisma["💎 Prisma ORM"]
         DB[("🛢️ PostgreSQL / Supabase")]
+        Stats["🧮 stats-engine.js: єдине ядро капіталу та залишків"]
     end
 
     User -->|Команди та повідомлення| Server
@@ -40,16 +44,25 @@ flowchart TD
 
     Server --> Security
     Security -->|Дозволено| Router
+    Server -->|Monobank webhook| SaveFirst
+    SaveFirst -->|Записано| DB
+    SaveFirst -->|Негайно 200 OK| Mono
+    SaveFirst -->|Фонове збагачення| AsyncAI
+    AsyncAI --> AI_Module
+    AI_Module --> Gemini
+    Gemini -.->|Помилка 429 або 503| Groq
+    AsyncAI -->|Оновити категорію та простір| DB
+    AsyncAI --> Notify
+    Notify -->|Кнопка уточнення| User
     Router -->|Зняття зі збережень| Withdraw
     Router -->|Аналіз витрат або чат| AI_Module
     AI_Module -->|Результат аналізу| Router
 
-    AI_Module --> Gemini
-    Gemini -.->|Помилка 429 або 503| Groq
-
     Withdraw --> Prisma
     Router -->|Запис операції| Prisma
     Prisma --> DB
+    DB --> Stats
+    Stats -->|Єдині залишки й капітал| Router
 ```
 
 ### Як це працює
@@ -57,15 +70,21 @@ flowchart TD
 - Telegram-повідомлення проходять перевірку власника за `MY_CHAT_ID`; сторонні користувачі не отримують доступу до команд.
 - Бот визначає дію: записати операцію, звірити баланс або відповісти як фінансовий радник.
 - `/withdraw <сума> [опис]` переносить суму зі збережень на картку: залишок картки зростає, заощадження зменшуються, загальний капітал не змінюється.
-- Вебхук Monobank перевіряє `MONO_SECRET` і захищає від дублікатів. Зняття готівки та комісія записуються однією атомарною транзакцією.
+- Вебхук Monobank перевіряє `MONO_SECRET` і `monoId`. Для звичайної транзакції спершу створюється базовий запис, після чого надсилається `200 OK`; AI-класифікація працює у фоні через `setImmediate`, оновлює категорію/простір і надсилає повідомлення з кнопкою `[✏️ Уточнити]`. Зняття готівки та комісія записуються одним атомарним пакетом.
+- `stats-engine.js` є єдиним джерелом розрахунків капіталу, залишку картки, готівки, заощаджень і боргів для `/stats`, `/monthly` та синхронізації.
 - Gemini є основним ШІ-провайдером, Groq — резервним. Помилки Gemini, зокрема `429` і `503`, журналюються перед перемиканням.
-- Prisma зберігає операції, історію розмови й відкладені звіти у PostgreSQL.
+- Prisma зберігає операції, історію розмови й відкладені звіти у PostgreSQL; JSON-бекапи включають усі таблиці та soft-deleted записи.
 
-## Нові можливості v4.5
+## Нові можливості v4.6
 
-- 🏦 **Зняття зі збережень (`/withdraw`):** переказ коштів із Банки на картку без викривлення залишків і загального капіталу. Доступний також псевдонім `/withdrawsavings`.
-- 🛡️ **Діагностика та резервування ШІ:** помилки Gemini журналюються, після чого запит автоматично переходить до Groq.
-- 🧹 **Розумне очищення JSON:** сирі JSON-відповіді ШІ перетворюються на читабельний Telegram HTML.
+- ⚡ **Асинхронний Save-First вебхук Monobank:** базова транзакція записується до відповіді `200 OK`, після чого AI збагачує її у фоні; це запобігає повторним доставкам через затримки AI.
+- 🧮 **Уніфікований Engine статистики (`stats-engine.js`):** спільний модуль для `/stats`, `/monthly` і команд синхронізації усуває розбіжності балансу й капіталу; суми округлюються до копійок.
+- 🌍 **Часовий пояс `TZ=Europe/Kyiv`:** локальний час процесу та всі Cron-задачі використовують київський часовий пояс незалежно від UTC-настройок сервера.
+- 🛠️ **Суворий парсинг сум (`parseAmount`):** підтримує кредитні від’ємні залишки в `/sync`, `/setbalance`, `/setsavings`, відхиляє текстове сміття на кшталт `12abc` та округлює суми до двох знаків.
+- 🤖 **Гнучкий AI-failover та контекстна валідація:** опціональний JSON-режим для структурованих відповідей, вільний текст для щоденного звіту та whitelist типів/просторів для уточнень і Monobank.
+- 📦 **Повний JSON-бекап:** `/reset` спершу надсилає дамп усіх таблиць власнику, а щотижневий Cron надсилає повний JSON; збережені системні поля, зокрема `toSource`, `monoId`, `batchId` та `is_deleted`.
+- 🛡️ **Загартування безпеки:** додані глобальні обробники помилок Telegraf і необроблених Promise rejection; `.gitignore` виключає `.env`, `.zip` та SQLite-артефакти.
+- 🏦 **Зняття зі збережень (`/withdraw`):** переказ із Банки на картку без зміни загального капіталу; доступна команда `/withdrawsavings`.
 
 ## Можливості бота
 
@@ -73,7 +92,7 @@ flowchart TD
 - Автоматичне розпізнавання фінансових операцій із тексту та Monobank webhook.
 - Статистика, синхронізація балансу, скасування останньої операції та пакетів транзакцій.
 - AI-радник зі збереженням короткої історії чату та режимом із тайм-аутом неактивності.
-- Щоденний звіт, місячний AI-аудит, CSV-експорт і щотижневий CSV-бекап у Telegram.
+- Щоденний звіт, місячний AI-аудит, CSV-експорт і щотижневий повний JSON-бекап у Telegram.
 - Доступ до команд обмежений власником бота.
 
 ## Технологічний стек
@@ -87,6 +106,7 @@ flowchart TD
 | Основний ШІ-провайдер | Gemini `gemini-3.5-flash` |
 | Резервний ШІ-провайдер | Groq SDK, `openai/gpt-oss-120b` |
 | Автоматизація | `node-cron` |
+| Часовий пояс | `Europe/Kyiv` (`TZ`) |
 
 ## Команди Telegram
 
@@ -104,7 +124,7 @@ flowchart TD
 | `/paydebt <сума>` | Записати погашення власного боргу. |
 | `/getdebt <сума>` | Записати повернення позичених вам грошей. |
 | `/undo` | Позначити останню транзакцію або її пакет як видалені. |
-| `/reset` | Очистити всі транзакції та історію чату після підтвердження фразою `ОЧИСТИТИ ДАНІ`. Операція незворотна. |
+| `/reset` | Надіслати JSON-бекап, потім очистити транзакції, історію чату та чергу звітів після підтвердження `ОЧИСТИТИ ДАНІ`. |
 | `/advice`, `/advisor`, `/ask` | Увійти в режим AI-радника. |
 | `/endadvice`, `/exit`, `/stop`, `/off` | Завершити режим AI-радника. |
 | `/add <сума> <опис>` | Додати ручну витрату з AI-класифікацією. |
@@ -119,10 +139,11 @@ flowchart TD
 | Шлях | Відповідальність |
 | --- | --- |
 | `index.js` | Express/Telegraf, allowlist, команди, webhook-и, Prisma-записи, cron-задачі й HTTP server. |
-| `fallback-ai.js` | Gemini/Groq failover для prompt і чату; повторні спроби для звітів. |
+| `fallback-ai.js` | Gemini/Groq failover із опціональним JSON-режимом; повторні спроби для звітів. Відповіді проходять контекстну валідацію в `index.js`. |
+| `stats-engine.js` | Єдине ядро розрахунків капіталу, залишків, заощаджень та боргів з єдиним екземпляром `PrismaClient`. |
 | `monthly-analytics.js` | Агрегація показників, боргів і категорій для місячного звіту. |
 | `monthly-ai.js` | Формування запиту до AI-аудитора й обробка JSON-відповіді. |
-| `export-helpers.js` | CSV-серіалізація й захист текстових комірок від formula injection. |
+| `export-helpers.js` | Формування CSV-експорту, захист комірок від formula injection і створення повних JSON-дампів БД. |
 | `prisma/schema.prisma` | PostgreSQL-моделі та constraints. |
 | `prisma/migrations/` | PostgreSQL baseline і міграція унікального `monoId`. |
 | `stress-test.js` | DB/API stress перевірки та локальні security-тести. |
@@ -151,6 +172,7 @@ DIRECT_URL=postgresql://user:password@host:5432/database?schema=public
 GEMINI_API_KEY=your_gemini_api_key
 GROQ_API_KEY=your_groq_api_key
 MONO_SECRET=use_a_unique_random_secret_of_at_least_32_characters
+TZ=Europe/Kyiv
 PORT=3000
 ```
 
@@ -165,6 +187,7 @@ PORT=3000
 | `GEMINI_API_KEY` | API key основного AI-провайдера. |
 | `GROQ_API_KEY` | API key резервного AI-провайдера. |
 | `MONO_SECRET` | Випадковий URL-секрет Monobank webhook, мінімум 32 символи. |
+| `TZ` | Часовий пояс процесу для обчислення дат і Cron-задач; застосунок встановлює `Europe/Kyiv`. |
 | `PORT` | HTTP-порт; за замовчуванням `3000`, Render задає автоматично. |
 | `RENDER_EXTERNAL_URL` | Render public URL; якщо заданий, бот реєструє Telegram webhook під час запуску. |
 
@@ -199,7 +222,7 @@ npx prisma migrate deploy
 1. Створіть Web Service із коренем репозиторію та PostgreSQL database.
 2. Встановіть Build Command: `npm ci && npx prisma generate && npx prisma migrate deploy`.
 3. Встановіть Start Command: `npm start` і Health Check Path: `/ping`.
-4. Додайте `BOT_TOKEN`, `MY_CHAT_ID`, `DATABASE_URL`, `DIRECT_URL`, `GEMINI_API_KEY`, `GROQ_API_KEY` і `MONO_SECRET` у Render Environment.
+4. Додайте `BOT_TOKEN`, `MY_CHAT_ID`, `DATABASE_URL`, `DIRECT_URL`, `GEMINI_API_KEY`, `GROQ_API_KEY`, `MONO_SECRET` і `TZ=Europe/Kyiv` у Render Environment.
 5. Для наявної БД виконайте одноразовий baseline resolve до першого deploy з міграціями; Render build не повинен виконувати його автоматично.
 6. Переконайтеся, що Telegram webhook зареєстрований на `https://<service>.onrender.com/telegram/<BOT_TOKEN>`.
 7. У Monobank задайте webhook URL `https://<service>.onrender.com/monobank/<MONO_SECRET>`.
@@ -213,7 +236,7 @@ Cron-задачі працюють у процесі Node.js за часовим
 | Щодня о 23:54 | Розрахунок і відправка щоденного звіту; при недоступності AI звіт ставиться в `ReportQueue`. |
 | Кожні 30 хвилин | Повторна обробка звітів `PENDING`. |
 | В останній день місяця о 23:55 | Місячний аудит. |
-| Щонеділі о 23:00 | Повний CSV backup у Telegram. |
+| Щонеділі о 23:00 | Повний JSON backup таблиць `Transaction`, `ChatHistory` і `ReportQueue` у Telegram, разом із soft-deleted записами. |
 
 Це in-process scheduler, не зовнішній durable queue. Використовуйте один постійно запущений інстанс: кілька реплік можуть дублювати cron-роботу, а sleep/restart може відкласти її. Стан режиму радника та cooldown для alert також зберігаються в пам’яті процесу й губляться після рестарту.
 
@@ -221,14 +244,14 @@ Cron-задачі працюють у процесі Node.js за часовим
 
 - **Telegram allowlist:** middleware звіряє `ctx.from.id` з `MY_CHAT_ID`; сторонні користувачі не отримують доступ до команд. Сповіщення про відмову та alert cooldown не замінюють rate limiting на рівні edge/proxy.
 - **Telegram webhook:** шлях містить `BOT_TOKEN`, але окремий Telegram `secret_token` header не налаштований. Не публікуйте URL webhook і використовуйте HTTPS.
-- **Monobank webhook:** `MONO_SECRET` має щонайменше 32 символи та порівнюється constant-time. Секрет є bearer credential у URL; URL може потрапити до access logs. Monobank-підпис тіла в цьому endpoint не перевіряється, тому застосовуйте унікальний секрет і ротайте його при витоку.
+- **Monobank webhook:** `MONO_SECRET` має щонайменше 32 символи та порівнюється constant-time. Секрет є bearer credential у URL; URL може потрапити до access logs. Monobank-підпис тіла в цьому endpoint не перевіряється, тому застосовуйте унікальний секрет і ротайте його при витоку. Після перевірки payload і дубля звичайна транзакція спершу зберігається в БД, а `200 OK` надсилається до AI-аналізу; категоризація та Telegram-сповіщення виконуються асинхронно.
 - **Webhook payload:** endpoint перевіряє наявність ID та числової суми; Express JSON parser використовує стандартний ліміт розміру body.
 - **Дедуплікація:** унікальний `monoId` захищає від повторних/конкурентних webhook deliveries. Зняття й комісія записуються в одній Prisma-транзакції.
 - **HTML:** динамічні значення, що вставляються в Telegram HTML, проходять `escapeHtml`.
-- **CSV:** текстові поля проходять `sanitizeForCsv`, зокрема category, description, workspace, type і source; поля також екрануються за правилами CSV. Експорт і backup містять приватні фінансові дані.
+- **Бекапи й CSV:** CSV-поля проходять `sanitizeForCsv`; JSON-бекап зберігає повні записи усіх трьох таблиць, включно з `toSource`, `monoId`, `batchId` та `is_deleted`. Файли містять приватні фінансові дані — обмежте доступ до Telegram-чату та завантажених копій.
 - **AI-провайдери:** текст повідомлень, історія радника й агреговані фінансові метрики можуть надсилатися до Gemini або Groq. Не передавайте дані, які не можна обробляти цими провайдерами.
-- **Секрети:** `.env` не комітьте. Якщо Monobank URL із попередньої версії вже публікувався або був закомічений, відкличте старий URL/секрет і створіть новий.
-- **Destructive actions:** `/reset` безповоротно видаляє всі транзакції та історію чату; перед підтвердженням переконайтеся, що backup збережений.
+- **Секрети й Git:** `.gitignore` виключає `.env`, `.zip`-архіви та SQLite-артефакти. Ротуйте всі ключі й токени (`BOT_TOKEN`, `GEMINI_API_KEY`, `GROQ_API_KEY`, `MONO_SECRET`, облікові дані БД), якщо вони потрапили до Git, логів або стороннього доступу.
+- **Destructive actions:** перед `/reset` бот створює та надсилає JSON-дамп усіх таблиць у приватний чат; очищення виконується лише після успішного надсилання копії.
 
 ## Перевірки
 

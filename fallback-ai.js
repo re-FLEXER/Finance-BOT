@@ -17,15 +17,20 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  * Санітар очищає обгортки розмітки й залишає зовнішній об'єкт JSON, якщо модель
  * додала до нього сторонній текст.
  * @param {string} prompt — текст запиту для обох ШІ-провайдерів.
+ * @param {{json?: boolean}} [options] — чи очікується структурована відповідь JSON.
  * @returns {Promise<{text: string, provider: string}>} Очищена відповідь і назва провайдера.
  */
-async function generateTextWithFallback(prompt) {
+async function generateTextWithFallback(prompt, { json = true } = {}) {
     let rawText;
     let providerName;
 
     // 🤖 Спочатку звертаємося до Gemini; помилку фіксуємо перед переходом на Groq.
     try {
-        const model = genAI.getGenerativeModel({ model: 'gemini-3.5-flash' }, GEMINI_REQUEST_OPTIONS);
+        const modelConfig = {
+            model: 'gemini-3.5-flash',
+            ...(json ? { generationConfig: { responseMimeType: 'application/json' } } : {})
+        };
+        const model = genAI.getGenerativeModel(modelConfig, GEMINI_REQUEST_OPTIONS);
         const result = await model.generateContent(prompt);
         rawText = result.response.text();
         providerName = 'Gemini (3.5 Flash)';
@@ -39,10 +44,10 @@ async function generateTextWithFallback(prompt) {
         try {
             const chatCompletion = await groq.chat.completions.create({
                 messages: [
-                    { 
-                        role: 'system', 
-                        content: 'You are a JSON extractor for a Ukrainian financial bot. ALL category names MUST be strictly in UKRAINIAN language (e.g. "Продукти", "Алкоголь", "Гігієна", "Підписки"). NEVER output English words for categories. Output ONLY valid JSON.' 
-                    },
+                    ...(json ? [{
+                        role: 'system',
+                        content: 'You are a JSON extractor for a Ukrainian financial bot. ALL category names MUST be strictly in UKRAINIAN language (e.g. "Продукти", "Алкоголь", "Гігієна", "Підписки"). NEVER output English words for categories. Output ONLY valid JSON.'
+                    }] : []),
                     { role: 'user', content: prompt }
                 ],
                 model: 'openai/gpt-oss-120b',
@@ -56,15 +61,19 @@ async function generateTextWithFallback(prompt) {
     }
 
     // 🧹 Прибираємо обгортки розмітки та виділяємо дані JSON для подальшого розбору.
-    let cleanedText = rawText.trim()
-        .replace(/```json/gi, '')
-        .replace(/```/g, '');
+    let cleanedText = rawText.trim();
 
-    const firstBrace = cleanedText.indexOf('{');
-    const lastBrace = cleanedText.lastIndexOf('}');
+    if (json) {
+        cleanedText = cleanedText
+            .replace(/```json/gi, '')
+            .replace(/```/g, '');
 
-    if (firstBrace !== -1 && lastBrace !== -1) {
-        cleanedText = cleanedText.substring(firstBrace, lastBrace + 1);
+        const firstBrace = cleanedText.indexOf('{');
+        const lastBrace = cleanedText.lastIndexOf('}');
+
+        if (firstBrace !== -1 && lastBrace !== -1) {
+            cleanedText = cleanedText.substring(firstBrace, lastBrace + 1);
+        }
     }
 
     return {
@@ -131,13 +140,14 @@ async function generateChatTextWithFallback(systemInstruction, history, userText
  * @param {string} prompt — текст запиту для ШІ-провайдерів.
  * @param {number} [maxRetries=5] — найбільша кількість спроб.
  * @param {number} [delayMs=12000] — пауза між спробами в мілісекундах.
+ * @param {{json?: boolean}} [options] — налаштування формату відповіді для провайдерів.
  * @returns {Promise<{text: string, provider: string}>} Перша успішна відповідь провайдера.
  * @throws {Error} Якщо всі спроби завершилися невдало.
  */
-async function generateTextWithRetry(prompt, maxRetries = 5, delayMs = 12000) {
+async function generateTextWithRetry(prompt, maxRetries = 5, delayMs = 12000, options = {}) {
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
-            const result = await generateTextWithFallback(prompt);
+            const result = await generateTextWithFallback(prompt, options);
             return result;
         } catch (err) {
             if (attempt === maxRetries) {
