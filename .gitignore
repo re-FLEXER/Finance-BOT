@@ -7,3 +7,8 @@ prisma/dev.db
 .DS_Store
 .idea/
 .vscode/
+
+# Архіви та бекапи
+*.zip
+*_BACKUP.zip
+backup_dump.json
