@@ -39,8 +39,9 @@ ${monthContextNote}
 - Витрати: ${metrics.expense.toFixed(2)} грн
 - Чиста дельта: ${metrics.delta.toFixed(2)} грн
 - Заощаджено за місяць: ${metrics.savings.toFixed(2)} грн
+- Мені винні (актив): ${metrics.debtToMe.toFixed(2)} грн
 - Мій борг (пасив): ${metrics.myDebt.toFixed(2)} грн
-- Загальний капітал: ${metrics.totalCapital.toFixed(2)} грн
+- Чистий капітал (активи мінус борги): ${metrics.totalCapital.toFixed(2)} грн
 
 ТОП-10 КАТЕГОРІЙ ВИТРАТ:
 ${categoriesSummary}

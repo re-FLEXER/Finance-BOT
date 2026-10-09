@@ -3,6 +3,7 @@ process.env.TZ = 'Europe/Kyiv';
 const express = require('express');
 const cron = require('node-cron');
 const crypto = require('crypto');
+const { Prisma } = require('@prisma/client');
 const { Telegraf, Markup } = require('telegraf');
 const { prisma, getStatsData } = require('./stats-engine');
 const { generateTextWithFallback, generateTextWithRetry, generateChatTextWithFallback } = require('./fallback-ai');
@@ -39,10 +40,13 @@ bot.use(async (ctx, next) => {
     const allowedUserId = Number(process.env.MY_CHAT_ID);
     const userId = ctx.from?.id;
 
-    // 2. Якщо це я — пропускаємо далі
-    if (userId === allowedUserId) {
+    // Приватні фінансові дані та команди дозволені лише в особистому чаті власника.
+    if (userId === allowedUserId && ctx.chat?.type === 'private' && ctx.chat.id === allowedUserId) {
         return next();
     }
+
+    // Не відповідаємо в групах, щоб навіть повідомлення про відмову не розкривало дані.
+    if (ctx.chat?.type !== 'private') return;
 
     // 🛑 Обмежуємо частоту сповіщень про сторонні звернення.
     const nowTimestamp = Date.now();
@@ -161,43 +165,72 @@ const AI_TRANSACTION_TYPES = new Set([
     'i_owe', 'owe_me', 'pay_debt', 'get_debt'
 ]);
 
+// Типи, які допустимі для банківської операції залежно від напрямку руху коштів по картці.
+const BANK_INFLOW_TYPES = ['income', 'get_debt'];
+const BANK_OUTFLOW_TYPES = ['expense', 'saving', 'pay_debt', 'owe_me'];
+// getStatsData у просторі «Проєкт» враховує лише дохід і витрату; решта типів завжди «Особисте».
+const PROJECT_TYPES = new Set(['income', 'expense']);
+// Типи зі спеціальною логікою source/toSource: через «Уточнити» їх створити не можна.
+const EDIT_FORBIDDEN_TYPES = new Set(['transfer', 'withdraw_saving']);
+
 /**
- * Перевіряє, що тип транзакції від ШІ входить до підтримуваного списку.
- * @param {object} aiData — розібрані дані транзакції від ШІ.
- * @returns {object} Дані ШІ з допустимим типом транзакції.
+ * Перевіряє відповідь ШІ: тип має входити до дозволеного набору для даного контексту.
+ * context: 'general' (текстовий ввід), 'add', 'edit', 'monobank' (з isIncome).
+ * Невідомий тип у 'general' та 'edit' повертається як undefined (виклик сам вирішує, що робити),
+ * у 'add' та 'monobank' підставляється безпечний тип за замовчуванням.
+ * @param {object} aiData — розібрані дані від ШІ.
+ * @param {object|string} [options] — { context, isIncome } або назва контексту.
+ * @param {boolean} [incomeSignal] — ознака зарахування, якщо контекст передано рядком.
+ * @returns {object} Дані з безпечними type, category, description, workspace, source, toSource.
  */
 function validateAiOutput(aiData, options = {}, incomeSignal = false) {
     const { context = 'general', isIncome = false } = typeof options === 'string'
         ? { context: options, isIncome: incomeSignal }
         : options;
     const output = aiData && typeof aiData === 'object' && !Array.isArray(aiData) ? aiData : {};
-    const type = output.type;
-    const monobankTypes = isIncome ? ['income', 'saving'] : ['expense', 'saving'];
-    const allowedTypes = context === 'monobank' ? monobankTypes : AI_TRANSACTION_TYPES;
-    const defaultType = context === 'edit'
-        ? undefined
-        : context === 'monobank'
-            ? (isIncome ? 'income' : 'expense')
-            : 'expense';
-    const typeIsAllowed = context === 'monobank'
-        ? allowedTypes.includes(type)
-        : allowedTypes.has(type);
-    let validatedType = typeIsAllowed ? type : defaultType;
-    const sourceIsValid = output.source === 'card' || output.source === 'cash';
-    const destinationIsValid = output.toSource === 'card' || output.toSource === 'cash';
 
-    if (validatedType === 'transfer' && (!sourceIsValid || !destinationIsValid)) {
-        validatedType = context === 'edit' ? undefined : 'expense';
+    let allowed;
+    let defaultType;
+    if (context === 'monobank') {
+        allowed = new Set(isIncome ? BANK_INFLOW_TYPES : BANK_OUTFLOW_TYPES);
+        defaultType = isIncome ? 'income' : 'expense';
+    } else if (context === 'add') {
+        allowed = new Set(['expense', 'income', 'saving']);
+        defaultType = 'expense';
+    } else if (context === 'edit') {
+        allowed = new Set([...AI_TRANSACTION_TYPES].filter((t) => !EDIT_FORBIDDEN_TYPES.has(t)));
+        defaultType = undefined;
+    } else {
+        allowed = AI_TRANSACTION_TYPES;
+        defaultType = undefined;
     }
 
-    const { source, toSource, ...safeOutput } = output;
+    let type = allowed.has(output.type) ? output.type : defaultType;
+    let source = output.source === 'card' || output.source === 'cash' ? output.source : 'card';
+    let toSource = null;
+
+    if (type === 'transfer') {
+        const destination = output.toSource === 'card' || output.toSource === 'cash'
+            ? output.toSource
+            : (source === 'card' ? 'cash' : 'card');
+        if (destination === source) type = undefined;
+        else toSource = destination;
+    }
+    if (type === 'withdraw_saving') source = 'card';
+
+    const category = typeof output.category === 'string' ? output.category.trim().slice(0, 80) : '';
+    const description = typeof output.description === 'string' ? output.description.trim().slice(0, 500) : '';
+    const requestedWorkspace = output.workspace === 'Особисте' || output.workspace === 'Проєкт'
+        ? output.workspace
+        : 'Особисте';
+
     return {
-        ...safeOutput,
-        type: validatedType,
-        workspace: output.workspace === 'Особисте' || output.workspace === 'Проєкт'
-            ? output.workspace
-            : 'Особисте',
-        ...(validatedType === 'transfer' ? { source, toSource } : {})
+        type,
+        category,
+        description,
+        workspace: type && !PROJECT_TYPES.has(type) ? 'Особисте' : requestedWorkspace,
+        source,
+        toSource
     };
 }
 
@@ -207,17 +240,25 @@ function validateAiOutput(aiData, options = {}, incomeSignal = false) {
  * @returns {number|null} Розібрана сума або null, якщо значення некоректне.
  */
 function parseAmount(input, { allowZero = false, allowNegative = false } = {}) {
-    if (input === null || input === undefined) return null;
+    if (typeof input !== 'string' && !(typeof input === 'number' && Number.isFinite(input))) return null;
     const str = String(input).trim().replace(/\s+/g, '').replace(',', '.');
-    if (!/^-?\d+(\.\d+)?$/.test(str)) return null;
+    const match = /^(-?)(\d+)(?:\.(\d+))?$/.exec(str);
+    if (!match) return null;
 
-    const val = Number(str);
-    if (!Number.isFinite(val)) return null;
-    if (!allowNegative && val < 0) return null;
-    if (!allowZero && val === 0) return null;
+    const [, sign, wholePart, fractionPart = ''] = match;
+    let cents;
+    try {
+        cents = BigInt(wholePart) * 100n + BigInt((fractionPart + '00').slice(0, 2));
+    } catch {
+        return null;
+    }
+    if (fractionPart[2] && fractionPart[2] >= '5') cents += 1n;
+    if (cents > BigInt(Number.MAX_SAFE_INTEGER)) return null;
+    if (sign === '-' && cents > 0n && !allowNegative) return null;
+    if (cents === 0n && !allowZero) return null;
 
-    const roundedAmount = Math.round(val * 100) / 100;
-    return Number.isFinite(roundedAmount) ? roundedAmount : null;
+    const signedCents = sign === '-' ? -Number(cents) : Number(cents);
+    return signedCents / 100;
 }
 
 /**
@@ -234,6 +275,72 @@ function matchesSecret(incomingSecret, expectedSecret) {
     const incoming = Buffer.from(incomingSecret);
     const expected = Buffer.from(expectedSecret);
     return incoming.length === expected.length && crypto.timingSafeEqual(incoming, expected);
+}
+
+const MONO_UAH_CURRENCY = 980;
+const MONO_CURRENCY_CACHE_TTL_MS = 5 * 60 * 1000;
+let monoCurrencyCache = { rates: null, fetchedAt: 0 };
+
+/**
+ * Отримує актуальний курс Monobank для перерахунку валюти рахунку в гривню.
+ * @param {number} currencyCode — ISO 4217 числовий код валюти рахунку.
+ * @returns {Promise<number>} Кількість гривень за одиницю валюти рахунку.
+ */
+async function getMonobankUahRate(currencyCode) {
+    if (currencyCode === MONO_UAH_CURRENCY) return 1;
+    if (monoCurrencyCache.rates && Date.now() - monoCurrencyCache.fetchedAt < MONO_CURRENCY_CACHE_TTL_MS) {
+        return findMonobankUahRate(monoCurrencyCache.rates, currencyCode);
+    }
+
+    const response = await fetch('https://api.monobank.ua/bank/currency', {
+        signal: AbortSignal.timeout(5000)
+    });
+    if (!response.ok) throw new Error(`Monobank currency API returned HTTP ${response.status}`);
+    const rates = await response.json();
+    if (!Array.isArray(rates)) throw new Error('Monobank currency API returned an invalid payload');
+    monoCurrencyCache = { rates, fetchedAt: Date.now() };
+    return findMonobankUahRate(rates, currencyCode);
+}
+
+function findMonobankUahRate(rates, currencyCode) {
+    const direct = rates.find((rate) => rate.currencyCodeA === currencyCode && rate.currencyCodeB === MONO_UAH_CURRENCY);
+    const reverse = rates.find((rate) => rate.currencyCodeA === MONO_UAH_CURRENCY && rate.currencyCodeB === currencyCode);
+    const quote = direct || reverse;
+    if (!quote) throw new Error(`Monobank has no UAH exchange rate for currency ${currencyCode}`);
+
+    const crossRate = Number(quote.rateCross);
+    const fallbackRate = (Number(quote.rateBuy) + Number(quote.rateSell)) / 2;
+    const rate = Number.isFinite(crossRate) && crossRate > 0 ? crossRate : fallbackRate;
+    if (!Number.isFinite(rate) || rate <= 0) throw new Error(`Monobank returned an invalid exchange rate for currency ${currencyCode}`);
+    return reverse ? 1 / rate : rate;
+}
+
+function convertMinorUnitsToUah(amountMinor, rate) {
+    const converted = new Prisma.Decimal(amountMinor)
+        .div(100)
+        .mul(rate)
+        .toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP)
+    const convertedCents = converted.mul(100);
+    if (!convertedCents.isInteger() || convertedCents.abs().greaterThan(Number.MAX_SAFE_INTEGER)) {
+        throw new Error('Converted Monobank amount is outside the supported precision range');
+    }
+    return converted.toNumber();
+}
+
+/**
+ * Виконує серіалізовану фінансову зміну з повтором після конфлікту транзакцій.
+ * @param {(tx: object) => Promise<unknown>} operation — зміни, які мають бути атомарними.
+ * @param {number} [maxAttempts=3] — максимальна кількість спроб при конфлікті.
+ * @returns {Promise<unknown>} Результат успішної транзакції.
+ */
+async function runSerializableTransaction(operation, maxAttempts = 3) {
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+            return await prisma.$transaction(operation, { isolationLevel: 'Serializable' });
+        } catch (error) {
+            if (error.code !== 'P2034' || attempt === maxAttempts) throw error;
+        }
+    }
 }
 
 /**
@@ -322,6 +429,8 @@ function cleanAiResponse(text) {
 
 // --- ТЕЛЕГРАМ ВЕБХУК НАЛАШТУВАННЯ ---
 const WEBHOOK_PATH = `/telegram/${process.env.BOT_TOKEN}`;
+const TELEGRAM_WEBHOOK_SECRET = process.env.TELEGRAM_WEBHOOK_SECRET || '';
+let telegramWebhookReady = !process.env.RENDER_EXTERNAL_URL;
 /**
  * 📬 Передає оновлення Telegram до обробника бота.
  * @param {object} req — запит із даними оновлення Telegram.
@@ -329,7 +438,13 @@ const WEBHOOK_PATH = `/telegram/${process.env.BOT_TOKEN}`;
  * @returns {unknown} Результат передавання оновлення.
  */
 app.post(WEBHOOK_PATH, (req, res) => {
-    bot.handleUpdate(req.body, res);
+    if (!matchesSecret(req.get('X-Telegram-Bot-Api-Secret-Token'), TELEGRAM_WEBHOOK_SECRET)) {
+        return res.status(403).send('Forbidden');
+    }
+    bot.handleUpdate(req.body, res).catch((error) => {
+        console.error('Помилка обробки Telegram webhook:', error);
+        if (!res.headersSent) res.sendStatus(500);
+    });
 });
 
 /**
@@ -360,7 +475,7 @@ const showStats = async (ctx) => {
 ⚠️ <b>Я винен (Пасив):</b> <code>${stats.currentIOwe.toFixed(2)}</code> грн
 ${hasDebt ? `📉 <b>Виплата боргу:</b> ${debtProgressBar}` : ''}
 ━━━━━━━━━━━━━━━━━━━━━
-💰 <b>ЗАГАЛЬНИЙ КАПІТАЛ:</b> <code>${stats.totalCapital.toFixed(2)}</code> грн
+💰 <b>ЧИСТИЙ КАПІТАЛ:</b> <code>${stats.totalCapital.toFixed(2)}</code> грн
 ━━━━━━━━━━━━━━━━━━━━━
 💼 <b>ПРОЄКТИ ТА ФРИЛАНС</b>
 🟢 <b>Доходи:</b> <code>${stats.wIncome.toFixed(2)}</code> грн
@@ -432,9 +547,11 @@ bot.command('setbalance', async (ctx) => {
     const amount = parseAmount(args[1], { allowZero: true, allowNegative: true });
     if (amount === null) return ctx.reply('⚠️ Формат: /setbalance <сума>. Наприклад: /setbalance 450,60');
     
-    await prisma.transaction.deleteMany({ where: { type: 'init_balance' } });
-    await prisma.transaction.create({
-        data: { type: 'init_balance', amount: amount, category: 'Початковий залишок', description: 'Задано вручну', workspace: 'Особисте' }
+    await runSerializableTransaction(async (tx) => {
+        await tx.transaction.deleteMany({ where: { type: 'init_balance' } });
+        await tx.transaction.create({
+            data: { type: 'init_balance', amount, category: 'Початковий залишок', description: 'Задано вручну', workspace: 'Особисте' }
+        });
     });
     await ctx.reply(`✅ Початковий залишок успішно зафіксовано: ${amount} грн.`);
 });
@@ -446,42 +563,40 @@ bot.command('setbalance', async (ctx) => {
  * @returns {Promise<{synced: boolean, message: string}>} Стан звірки та повідомлення для користувача.
  */
 async function processBalanceSync(realAmount) {
-    const stats = await getStatsData();
-    const diff = realAmount - stats.cardBalance;
+    return runSerializableTransaction(async (tx) => {
+        const stats = await getStatsData(tx);
+        const diffCents = Math.round((realAmount - stats.cardBalance) * 100);
 
-    // Якщо різниця 0 — баланси вже ідеально збігаються
-    if (Math.abs(diff) < 0.01) {
-        return {
-            synced: false,
-            message: `👌 <b>Баланс уже ідеальний!</b>\nНа картці в боті та по факту рівно <code>${realAmount.toFixed(2)}</code> грн.`
-        };
-    }
-
-    const isExpenseCorrection = diff < 0;
-    const absDiff = Math.abs(diff);
-
-    // 🧾 Записуємо коригування окремо, не змінюючи початковий залишок.
-    await prisma.transaction.create({
-        data: {
-            type: isExpenseCorrection ? 'expense' : 'income',
-            amount: absDiff,
-            source: 'card',
-            category: '🛠 Коригування',
-            description: isExpenseCorrection 
-                ? `Смарт-синхронізація (невраховані витрати: -${absDiff.toFixed(2)} грн)`
-                : `Смарт-синхронізація (неврахований дохід: +${absDiff.toFixed(2)} грн)`,
-            workspace: 'Особисте'
+        if (diffCents === 0) {
+            return {
+                synced: false,
+                message: `👌 <b>Баланс уже ідеальний!</b>\nНа картці в боті та по факту рівно <code>${realAmount.toFixed(2)}</code> грн.`
+            };
         }
+
+        const isExpenseCorrection = diffCents < 0;
+        const absDiff = Math.abs(diffCents) / 100;
+        await tx.transaction.create({
+            data: {
+                type: isExpenseCorrection ? 'expense' : 'income',
+                amount: absDiff,
+                source: 'card',
+                category: '🛠 Коригування',
+                description: isExpenseCorrection
+                    ? `Смарт-синхронізація (невраховані витрати: -${absDiff.toFixed(2)} грн)`
+                    : `Смарт-синхронізація (неврахований дохід: +${absDiff.toFixed(2)} грн)`,
+                workspace: 'Особисте'
+            }
+        });
+
+        const statusIcon = isExpenseCorrection ? '🔴' : '🟢';
+        const msg = `🔄 <b>СМАРТ-СИНХРОНІЗАЦІЯ ВИКОНАНА</b>\n━━━━━━━━━━━━━━━━━━━\n` +
+                    `💳 <b>Було в боті:</b> <code>${stats.cardBalance.toFixed(2)}</code> грн\n` +
+                    `🎯 <b>Встановлено факт:</b> <code>${realAmount.toFixed(2)}</code> грн\n` +
+                    `${statusIcon} <b>Коригування:</b> <code>${isExpenseCorrection ? '-' : '+'}${absDiff.toFixed(2)}</code> грн (категорія: 🛠 Коригування)\n\n` +
+                    `<i>Початковий залишок збережено без змін.</i>`;
+        return { synced: true, message: msg };
     });
-
-    const statusIcon = isExpenseCorrection ? '🔴' : '🟢';
-    const msg = `🔄 <b>СМАРТ-СИНХРОНІЗАЦІЯ ВИКОНАНА</b>\n━━━━━━━━━━━━━━━━━━━\n` +
-                `💳 <b>Було в боті:</b> <code>${stats.cardBalance.toFixed(2)}</code> грн\n` +
-                `🎯 <b>Встановлено факт:</b> <code>${realAmount.toFixed(2)}</code> грн\n` +
-                `${statusIcon} <b>Коригування:</b> <code>${isExpenseCorrection ? '-' : '+'}${absDiff.toFixed(2)}</code> грн (категорія: 🛠 Коригування)\n\n` +
-                `<i>Початковий залишок збережено без змін. Математика історії повністю чиста.</i>`;
-
-    return { synced: true, message: msg };
 }
 
 
@@ -509,28 +624,36 @@ bot.command('setsavings', async (ctx) => {
     const targetAmount = parseAmount(args[1], { allowZero: true, allowNegative: true });
     if (targetAmount === null) return ctx.reply('⚠️ Формат: /setsavings <сума>. Наприклад: /setsavings 5000');
 
-   const allTransactions = await prisma.transaction.findMany({ 
-        where: { 
-            is_deleted: false,
-            OR: [{ type: 'saving' }, { type: 'withdraw_saving' }, { type: 'init_saving' }]
-        } 
+    await runSerializableTransaction(async (tx) => {
+        const allTransactions = await tx.transaction.findMany({
+            where: {
+                is_deleted: false,
+                OR: [{ type: 'saving' }, { type: 'withdraw_saving' }, { type: 'init_saving' }]
+            },
+            orderBy: { id: 'asc' }
+        });
+        let currentDynamicSavings = 0;
+        const initSavings = [];
+
+        allTransactions.forEach((t) => {
+            if (t.type === 'init_saving') initSavings.push(t);
+            else if (t.type === 'saving') currentDynamicSavings += Number(t.amount);
+            else if (t.type === 'withdraw_saving') currentDynamicSavings -= Number(t.amount);
+        });
+
+        const newInitSaving = targetAmount - currentDynamicSavings;
+        if (initSavings.length > 0) {
+            await tx.transaction.update({ where: { id: initSavings[0].id }, data: { amount: newInitSaving } });
+            if (initSavings.length > 1) {
+                await tx.transaction.updateMany({
+                    where: { id: { in: initSavings.slice(1).map((t) => t.id) } },
+                    data: { is_deleted: true }
+                });
+            }
+        } else {
+            await tx.transaction.create({ data: { type: 'init_saving', amount: newInitSaving, category: 'Стартове збереження', workspace: 'Особисте' } });
+        }
     });
-    let currentDynamicSavings = 0;
-    let initSavingId = null;
-
-    allTransactions.forEach(t => {
-        if (t.type === 'init_saving') initSavingId = t.id;
-        else if (t.type === 'saving') currentDynamicSavings += t.amount;
-        else if (t.type === 'withdraw_saving') currentDynamicSavings -= t.amount;
-    });
-
-    const newInitSaving = targetAmount - currentDynamicSavings;
-
-    if (initSavingId) {
-        await prisma.transaction.update({ where: { id: initSavingId }, data: { amount: newInitSaving } });
-    } else {
-        await prisma.transaction.create({ data: { type: 'init_saving', amount: newInitSaving, category: 'Стартове збереження', workspace: 'Особисте' } });
-    }
     await ctx.reply(`✅ Збереження успішно синхронізовано! Тепер у скарбничці: ${targetAmount} грн.`);
 });
 
@@ -703,7 +826,7 @@ bot.command('undo', async (ctx) => {
                 data: { is_deleted: true }
             });
 
-            const totalAmount = batchTxs.reduce((sum, t) => sum + t.amount, 0);
+        const totalAmount = batchTxs.reduce((sum, t) => sum + Number(t.amount), 0);
 
             return await ctx.replyWithHTML(
                 `🔄 <b>ПАКЕТНУ ОПЕРАЦІЮ УСПІШНО СКАСОВАНО!</b>\n━━━━━━━━━━━━━━━━━━━\n` +
@@ -853,48 +976,48 @@ bot.command('add', async (ctx) => {
     const description = parts.slice(1).join(' ') || 'Ручна витрата';
     const statusMsg = await ctx.reply('⏳ Записую витрату...');
 
+    let aiData = { type: 'expense', category: 'Загальне', workspace: 'Особисте' };
+    let provider = 'AI недоступний';
     try {
-        const prompt = `Проаналізуй фінансову витрату користувача: "${description}", сума: ${amount}.
+        const prompt = `Проаналізуй фінансову витрату користувача: ${JSON.stringify(description)}, сума: ${amount}.
 
 ВИМОГА ДО МОВИ: category ПОВИННА БУТИ СУВОРО УКРАЇНСЬКОЮ МОВОЮ (наприклад: "Продукти", "Алкоголь", "Гігієна", "Ресторани", "Сервіс"). ЖОДНИХ АНГЛІЙСЬКИХ СЛІВ!
 
 Визнач type ("expense", "income", "saving"), category (коротко 1-2 слова) та workspace ("Особисте" або "Проєкт").
 Формат JSON: {"type": "expense", "category": "...", "workspace": "..."}`;
 
-        const { text: textResponse, provider } = await generateTextWithFallback(prompt);
+        const result = await generateTextWithFallback(prompt);
+        provider = result.provider;
 
-        const cleanJson = textResponse.trim().replace(/```json/g, '').replace(/```/g, '').trim();
-        const aiData = validateAiOutput(JSON.parse(cleanJson));
+        const cleanJson = result.text.trim().replace(/```json/gi, '').replace(/```/g, '').trim();
+        aiData = validateAiOutput(JSON.parse(cleanJson), { context: 'add' });
+    } catch (e) {
+        console.error('AI-класифікація /add недоступна; зберігаю без класифікації:', e.message);
+    }
 
-        await prisma.transaction.create({
+    let savedTx;
+    try {
+        savedTx = await prisma.transaction.create({
             data: {
                 type: aiData.type || 'expense',
-                amount: amount,
+                amount,
                 category: aiData.category || 'Загальне',
-                description: description,
+                description,
                 workspace: aiData.workspace || 'Особисте'
             }
         });
-
-        return await ctx.telegram.editMessageText(
-            ctx.chat.id,
-            statusMsg.message_id,
-            null,
-            `✅ <b>Витрату успішно додано!</b>\n\n💵 <b>Сума:</b> <code>${amount.toFixed(2)}</code> грн\n🏷 <b>Категорія:</b> ${escapeHtml(aiData.category)}\n📦 <b>Простір:</b> ${escapeHtml(aiData.workspace || 'Особисте')}\n📝 <b>Опис:</b> <i>${escapeHtml(description)}</i>\n\n🤖 <i>Оброблено через: ${provider}</i>`,
-            { parse_mode: 'HTML' }
-        );
     } catch (e) {
-        console.error('Помилка /add', e);
-        await prisma.transaction.create({
-            data: { type: 'expense', amount: amount, category: 'Загальне', description: description, workspace: 'Особисте' }
-        });
-        return await ctx.telegram.editMessageText(
-            ctx.chat.id,
-            statusMsg.message_id,
-            null,
-            `✅ <b>Витрату додано!</b> (Категорія: Загальне, AI недоступний)\n💵 <b>Сума:</b> <code>${amount.toFixed(2)}</code> грн`,
-            { parse_mode: 'HTML' }
-        );
+        console.error('Не вдалося записати /add до бази:', e);
+        await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
+        return ctx.reply('❌ Не вдалося записати операцію до бази. Повтори команду пізніше.');
+    }
+
+    const confirmation = `✅ <b>Витрату успішно додано!</b>\n\n💵 <b>Сума:</b> <code>${amount.toFixed(2)}</code> грн\n🏷 <b>Категорія:</b> ${escapeHtml(savedTx.category)}\n📦 <b>Простір:</b> ${escapeHtml(savedTx.workspace)}\n📝 <b>Опис:</b> <i>${escapeHtml(description)}</i>\n\n🤖 <i>Оброблено через: ${provider}</i>`;
+    try {
+        return await ctx.telegram.editMessageText(ctx.chat.id, statusMsg.message_id, null, confirmation, { parse_mode: 'HTML' });
+    } catch (e) {
+        console.warn('Операцію /add збережено, але не вдалося оновити повідомлення:', e.message);
+        return ctx.replyWithHTML(confirmation);
     }
 });
 
@@ -1061,6 +1184,7 @@ async function runAndSendMonthlyAudit(chatId, isAuto = false) {
                 `${deltaIcon} Дельта: <code>${m.delta.toFixed(2)}</code> грн\n` +
                 `💰 Загальний капітал: <code>${m.totalCapital.toFixed(2)}</code> грн\n` +
                 `🏦 Заощаджено: <code>${m.savings.toFixed(2)}</code> грн\n` +
+                `🤝 Мені винні: <code>${m.debtToMe.toFixed(2)}</code> грн\n` +
                 `⚠️ Мій борг: <code>${m.myDebt.toFixed(2)}</code> грн\n\n` +
                 `🏆 <b>ТОП-10 ПОЖИРАЧІВ ВИТРАТ:</b>\n${top10Text}\n` +
                 `🗣 <b>ВЕРДИКТ АУДИТОРА:</b>\n<i>"${escapeHtml(audit.verdict)}"</i>\n\n` +
@@ -1076,6 +1200,7 @@ async function runAndSendMonthlyAudit(chatId, isAuto = false) {
                 `🔴 Витрати: <code>${m.expense.toFixed(2)}</code> грн\n` +
                 `${deltaIcon} Дельта: <code>${m.delta.toFixed(2)}</code> грн\n` +
                 `💰 Загальний капітал: <code>${m.totalCapital.toFixed(2)}</code> грн\n` +
+                `🤝 Мені винні: <code>${m.debtToMe.toFixed(2)}</code> грн\n` +
                 `⚠️ Борг: <code>${m.myDebt.toFixed(2)}</code> грн\n\n` +
                 `🏆 <b>ТОП-10 ПОЖИРАЧІВ ВИТРАТ:</b>\n${top10Text}\n` +
                 `⚠️ <i>AI-Аудитор тимчасово недоступний, але цифри пораховано точно.</i>`;
@@ -1328,24 +1453,27 @@ bot.on('text', async (ctx) => {
             const { text: textResponse } = await generateTextWithFallback(prompt);
             const cleanJson = textResponse.replace(/```json/g, '').replace(/```/g, '').trim();
             const aiData = validateAiOutput(JSON.parse(cleanJson), { context: 'edit' });
-            
-            await prisma.transaction.update({
-                where: { id: txId },
-                data: { 
-                    type: aiData.type, 
-                    category: aiData.category, 
-                    workspace: aiData.workspace, 
-                    source: aiData.source,
-                    toSource: aiData.toSource,
-                    description: userText 
-                }
-            });
+            const original = await prisma.transaction.findUnique({ where: { id: txId } });
+            if (!original || original.is_deleted) {
+                return await ctx.telegram.editMessageText(ctx.chat.id, statusMsg.message_id, null, '❌ Цю транзакцію вже видалено або не знайдено.');
+            }
+
+            // Переказ, зняття зі збережень і початкові залишки мають особливу логіку: їхній тип, простір і напрямок не чіпаємо.
+            const isLocked = ['transfer', 'withdraw_saving', 'init_balance', 'init_saving'].includes(original.type);
+            const updateData = { description: userText };
+            if (aiData.category) updateData.category = aiData.category;
+            if (!isLocked && aiData.type) {
+                updateData.type = aiData.type;
+                updateData.workspace = aiData.workspace;
+            }
+
+            await prisma.transaction.update({ where: { id: txId }, data: updateData });
 
             return await ctx.telegram.editMessageText(
                 ctx.chat.id,
                 statusMsg.message_id,
                 null,
-                `✅ <b>Транзакцію успішно оновлено!</b>\n🏷 <b>Категорія:</b> ${escapeHtml(aiData.category)}\n📦 <b>Простір:</b> ${escapeHtml(aiData.workspace || 'Особисте')}`,
+                `✅ <b>Транзакцію успішно оновлено!</b>\n🏷 <b>Категорія:</b> ${escapeHtml(updateData.category || original.category)}\n📦 <b>Простір:</b> ${escapeHtml(updateData.workspace || original.workspace || 'Особисте')}`,
                 { parse_mode: 'HTML' }
             );
         } catch (e) {
@@ -1363,32 +1491,53 @@ bot.on('text', async (ctx) => {
     const intentData = await classifyUserIntent(userText);
 
     // 🔄 4.1. Якщо вказано фактичний залишок, запускаємо звірку балансу.
-    if (intentData && intentData.intent === 'SYNC' && typeof intentData.amount === 'number') {
-        const syncResult = await processBalanceSync(intentData.amount);
+    if (intentData && intentData.intent === 'SYNC') {
+        const realAmount = parseAmount(intentData.amount, { allowZero: true, allowNegative: true });
+        if (realAmount === null) {
+            return await ctx.reply('⚠️ Не вдалося перевірити суму балансу. Повтори її у форматі /sync 1234,56.');
+        }
+        const syncResult = await processBalanceSync(realAmount);
         return await ctx.replyWithHTML(syncResult.message);
     }
 
     // 🧾 4.2. Записуємо одну операцію або пов'язаний пакет операцій.
     if (intentData && intentData.isTransaction && Array.isArray(intentData.transactions) && intentData.transactions.length > 0) {
-        const batchId = intentData.transactions.length > 1 ? crypto.randomUUID() : null;
-        const createdTxList = [];
-
-        for (const tx of intentData.transactions) {
-            const validatedTx = validateAiOutput(tx);
-            const savedTx = await prisma.transaction.create({
-                data: {
-                    type: validatedTx.type,
-                    amount: Number(tx.amount),
-                    source: validatedTx.source || tx.source || 'card',
-                    toSource: validatedTx.toSource || tx.toSource || null,
-                    category: tx.category || 'Загальне',
-                    description: tx.description || userText,
-                    workspace: tx.workspace || 'Особисте',
-                    batchId: batchId
-                }
-            });
-            createdTxList.push(savedTx);
+        if (intentData.transactions.length > 20) {
+            return await ctx.reply('⚠️ Знайшлося забагато операцій в одному повідомленні. Розбий його на кілька повідомлень.');
         }
+
+        const normalizedTransactions = [];
+        for (const rawTx of intentData.transactions) {
+            const amount = parseAmount(rawTx?.amount);
+            if (amount === null) {
+                return await ctx.reply('⚠️ Не вдалося перевірити суму AI-розбору. Жодну операцію не записано; надішли повідомлення ще раз або скористайся /add.');
+            }
+
+            const validatedTx = validateAiOutput(rawTx);
+            if (!validatedTx.type) {
+                return await ctx.reply('⚠️ Не вдалося надійно визначити тип операції (наприклад, переказ без напрямку). Жодну операцію не записано — переформулюй повідомлення або скористайся /add.');
+            }
+            normalizedTransactions.push({
+                type: validatedTx.type,
+                amount,
+                source: validatedTx.source,
+                toSource: validatedTx.toSource,
+                category: validatedTx.category || 'Загальне',
+                description: (validatedTx.description || userText).slice(0, 500),
+                workspace: validatedTx.workspace
+            });
+        }
+
+        const batchId = normalizedTransactions.length > 1 ? crypto.randomUUID() : null;
+        const createdTxList = await prisma.$transaction(async (tx) => {
+            const savedTransactions = [];
+            for (const normalizedTx of normalizedTransactions) {
+                savedTransactions.push(await tx.transaction.create({
+                    data: { ...normalizedTx, batchId }
+                }));
+            }
+            return savedTransactions;
+        });
 
         if (createdTxList.length === 1) {
             // Одинарна транзакція
@@ -1428,6 +1577,17 @@ bot.on('text', async (ctx) => {
 // 🏦 ВЕБХУКИ (MONOBANK ТА TELEGRAM)
 // ==========================================
 /**
+ * ✅ Підтверджує адресу вебхука під час реєстрації в Monobank.
+ * Monobank перевіряє URL GET-запитом і очікує HTTP 200.
+ */
+app.get('/monobank/:secret', (req, res) => {
+    if (!matchesSecret(req.params.secret, process.env.MONO_SECRET)) {
+        return res.status(403).send('Forbidden: Invalid Webhook Secret');
+    }
+    return res.sendStatus(200);
+});
+
+/**
  * 🏦 Перевіряє вебхук Monobank, відсікає дублікати й записує операцію.
  * Зняття готівки та банківська комісія зберігаються атомарно як переказ і витрата.
  * @param {object} req — запит із підписаним шляхом і даними виписки Monobank.
@@ -1444,19 +1604,28 @@ app.post('/monobank/:secret', async (req, res) => {
         return res.status(403).send('Forbidden: Invalid Webhook Secret');
     }
 
-    const data = req.body?.data;
-    if (!data || !data.statementItem) {
-        return res.status(200).send('OK'); 
-    }
+    if (req.body?.type !== 'StatementItem') return res.status(200).send('OK');
+    const data = req.body.data;
+    if (!data?.statementItem) return res.status(400).send('Invalid webhook payload');
 
     const item = data.statementItem;
-    if (typeof item.id !== 'string' || !item.id.trim() || !Number.isFinite(item.amount)) {
+    if (
+        typeof item.id !== 'string' || !item.id.trim() || item.id.length > 255 ||
+        !Number.isSafeInteger(item.amount) || !Number.isSafeInteger(item.time) || item.time <= 0 ||
+        !Number.isInteger(item.currencyCode) || item.currencyCode <= 0 ||
+        (item.commissionRate !== undefined && !Number.isSafeInteger(item.commissionRate))
+    ) {
         return res.status(400).send('Invalid webhook payload');
     }
+    if (item.amount === 0) return res.status(200).send('OK');
 
-    const amount = Math.abs(item.amount) / 100;
-    const commission = item.commissionRate ? Math.abs(item.commissionRate) / 100 : 0;
-    const description = item.description || 'Транзакція Monobank';
+    const amountMinor = Math.abs(item.amount);
+    const commissionMinor = item.commissionRate ? Math.abs(item.commissionRate) : 0;
+    const eventDate = new Date(item.time * 1000);
+    if (!Number.isFinite(eventDate.getTime())) return res.status(400).send('Invalid webhook timestamp');
+    const description = typeof item.description === 'string'
+        ? item.description.slice(0, 1000)
+        : 'Транзакція Monobank';
     const isIncome = item.amount > 0;
     const monoId = item.id;
 
@@ -1473,6 +1642,10 @@ app.post('/monobank/:secret', async (req, res) => {
             return res.status(200).send('OK');
         }
 
+        const currencyRate = await getMonobankUahRate(item.currencyCode);
+        const amount = convertMinorUnitsToUah(amountMinor, currencyRate);
+        const commission = convertMinorUnitsToUah(commissionMinor, currencyRate);
+
         // Парні зарахування відкидаємо лише за позитивною сумою та словами в описі.
         const lowerDesc = description.toLowerCase();
         const isJarDeposit = isIncome && (
@@ -1483,65 +1656,65 @@ app.post('/monobank/:secret', async (req, res) => {
         if (isJarDeposit) return res.status(200).send('OK');
 
         // 🏧 Зняття готівки зберігається атомарно; подальше сповіщення виконується у фоні.
-        const isCashWithdrawal = lowerDesc.includes('зняття готівки') ||
-                                 lowerDesc.includes('банкомат') ||
-                                 item.mcc === 6011;
+        const isCashWithdrawal = !isIncome && (
+            lowerDesc.includes('зняття готівки') ||
+            lowerDesc.includes('банкомат') ||
+            item.mcc === 6011
+        );
         if (isCashWithdrawal) {
+            if (commissionMinor > amountMinor) return res.status(400).send('Invalid cash withdrawal commission');
+            const cleanAmount = convertMinorUnitsToUah(amountMinor - commissionMinor, currencyRate);
+            const batchId = crypto.randomUUID();
+            const savedTx = await prisma.$transaction(async (tx) => {
+                const withdrawal = await tx.transaction.create({
+                    data: {
+                        monoId,
+                        type: 'transfer',
+                        amount: cleanAmount,
+                        source: 'card',
+                        toSource: 'cash',
+                        category: 'Зняття готівки',
+                        description,
+                        workspace: 'Особисте',
+                        batchId,
+                        createdAt: eventDate
+                    }
+                });
+
+                if (commission > 0) {
+                    await tx.transaction.create({
+                        data: {
+                            monoId: `${monoId}_commission`,
+                            type: 'expense',
+                            amount: commission,
+                            source: 'card',
+                            category: 'Комісії банку',
+                            description: `Комісія: ${description}`,
+                            workspace: 'Особисте',
+                            batchId,
+                            createdAt: eventDate
+                        }
+                    });
+                }
+                return withdrawal;
+            });
+
+            // Підтверджуємо webhook лише після commit фінансового запису.
             res.status(200).send('OK');
             setImmediate(async () => {
+                const cleanDescription = escapeHtml(description);
+                const msg = `🏦 <b>Monobank</b> | Автоматично\n\n` +
+                            `🏧 <b>Операція:</b> Зняття готівки (Спліт)\n` +
+                            `💵 <b>У готівку:</b> <code>${cleanAmount.toFixed(2)}</code> грн (💳 ➔ 💵)\n` +
+                            `${commission > 0 ? `💸 <b>Комісія банку:</b> <code>${commission.toFixed(2)}</code> грн\n` : ''}` +
+                            `📝 <b>Опис:</b> <i>${cleanDescription}</i>`;
                 try {
-                    const cleanAmount = amount - commission;
-                    const batchId = crypto.randomUUID();
-                    const savedTx = await prisma.$transaction(async (tx) => {
-                        const withdrawal = await tx.transaction.create({
-                            data: {
-                                monoId,
-                                type: 'transfer',
-                                amount: cleanAmount,
-                                source: 'card',
-                                toSource: 'cash',
-                                category: 'Зняття готівки',
-                                description,
-                                workspace: 'Особисте',
-                                batchId
-                            }
-                        });
-
-                        if (commission > 0) {
-                            await tx.transaction.create({
-                                data: {
-                                    monoId: `${monoId}_commission`,
-                                    type: 'expense',
-                                    amount: commission,
-                                    source: 'card',
-                                    category: 'Комісії банку',
-                                    description: `Комісія: ${description}`,
-                                    workspace: 'Особисте',
-                                    batchId
-                                }
-                            });
-                        }
-
-                        return withdrawal;
-                    });
-
-                    const cleanDescription = escapeHtml(description);
-                    const msg = `🏦 <b>Monobank</b> | Автоматично\n\n` +
-                                `🏧 <b>Операція:</b> Зняття готівки (Спліт)\n` +
-                                `💵 <b>У готівку:</b> <code>${cleanAmount.toFixed(2)}</code> грн (💳 ➔ 💵)\n` +
-                                `${commission > 0 ? `💸 <b>Комісія банку:</b> <code>${commission.toFixed(2)}</code> грн\n` : ''}` +
-                                `📝 <b>Опис:</b> <i>${cleanDescription}</i>`;
-
                     await bot.telegram.sendMessage(process.env.MY_CHAT_ID, msg, {
                         parse_mode: 'HTML',
                         ...Markup.inlineKeyboard([[Markup.button.callback('✏️ Уточнити', `edit_${savedTx.id}`)]])
                     });
                 } catch (error) {
-                    if (error.code === 'P2002') {
-                        console.warn('Повторне зняття Monobank вже було оброблене:', monoId);
-                        return;
-                    }
-                    console.error('💥 Критична помилка фонового оброблення зняття Monobank:', error);
+                    console.error('💥 Не вдалося сповістити про зняття Monobank:', error);
                 }
             });
             return;
@@ -1552,11 +1725,12 @@ app.post('/monobank/:secret', async (req, res) => {
             data: {
                 monoId,
                 type: isIncome ? 'income' : 'expense',
-                amount: Math.round(amount * 100) / 100,
+                amount,
                 source: 'card',
                 category: 'Загальне',
                 description,
-                workspace: 'Особисте'
+                workspace: 'Особисте',
+                createdAt: eventDate
             }
         });
 
@@ -1633,8 +1807,15 @@ const PORT = process.env.PORT || 3000;
  * @param {object} res — відповідь вебсервера.
  * @returns {object} Відповідь зі станом успішної роботи.
  */
-app.get('/ping', (req, res) => {
-    res.status(200).send('OK');
+app.get('/ping', async (req, res) => {
+    try {
+        await prisma.$queryRaw`SELECT 1`;
+        if (!telegramWebhookReady) return res.status(503).send('Webhook not ready');
+        return res.status(200).send('OK');
+    } catch (error) {
+        console.error('Health check: база даних недоступна:', error.message);
+        return res.status(503).send('Database unavailable');
+    }
 });
 
 /**
@@ -1659,16 +1840,17 @@ async function getDailyReportData() {
         }
     });
 
-    let dayIncome = 0;
-    let dayExpense = 0;
+    let dayIncomeCents = 0;
+    let dayExpenseCents = 0;
     const categoryExpenses = {};
 
     dailyTx.forEach(t => {
+        const amountCents = Math.round(Number(t.amount) * 100);
         if (t.type === 'income') {
-            dayIncome += t.amount;
+            dayIncomeCents += amountCents;
         } else if (t.type === 'expense') {
-            dayExpense += t.amount;
-            categoryExpenses[t.category] = (categoryExpenses[t.category] || 0) + t.amount;
+            dayExpenseCents += amountCents;
+            categoryExpenses[t.category] = (categoryExpenses[t.category] || 0) + amountCents;
         }
     });
 
@@ -1676,9 +1858,9 @@ async function getDailyReportData() {
     const globalStats = await getStatsData();
 
     return {
-        dayIncome,
-        dayExpense,
-        categoryExpenses,
+        dayIncome: dayIncomeCents / 100,
+        dayExpense: dayExpenseCents / 100,
+        categoryExpenses: Object.fromEntries(Object.entries(categoryExpenses).map(([category, cents]) => [category, cents / 100])),
         realBalance: globalStats.personalBalance,
         totalCapital: globalStats.totalCapital
     };
@@ -1702,7 +1884,7 @@ async function generateDailyAiAnalysis(dailyData) {
         }
     });
 
-    const totalWeekExpense = pastWeekTx.reduce((sum, t) => sum + t.amount, 0);
+    const totalWeekExpense = pastWeekTx.reduce((sum, t) => sum + Number(t.amount), 0);
     const avgDailyExpense = totalWeekExpense / 7;
 
     // 2. Деталізований 4-пунктовий промпт
@@ -1907,8 +2089,17 @@ app.listen(PORT, async () => {
     }
 
     if (process.env.RENDER_EXTERNAL_URL) {
-        const fullWebhookUrl = `${process.env.RENDER_EXTERNAL_URL}${WEBHOOK_PATH}`;
-        await bot.telegram.setWebhook(fullWebhookUrl);
+        try {
+            if (!matchesSecret(TELEGRAM_WEBHOOK_SECRET, TELEGRAM_WEBHOOK_SECRET)) {
+                throw new Error('TELEGRAM_WEBHOOK_SECRET має містити щонайменше 32 символи');
+            }
+            const fullWebhookUrl = `${process.env.RENDER_EXTERNAL_URL}${WEBHOOK_PATH}`;
+            await bot.telegram.setWebhook(fullWebhookUrl, { secret_token: TELEGRAM_WEBHOOK_SECRET });
+            telegramWebhookReady = true;
+        } catch (err) {
+            telegramWebhookReady = false;
+            console.error('Не вдалося налаштувати захищений Telegram webhook:', err);
+        }
     }
 });
 

@@ -1,4 +1,5 @@
 @monoSecret = {{$dotenv MONO_SECRET}}
+@monoApiToken = {{$dotenv MONO_API_TOKEN}}
 
 ### 1. Перевірка локального сервера / health-check
 GET http://localhost:3000/ping
@@ -15,7 +16,7 @@ POST http://localhost:3000/monobank/{{monoSecret}}
 Content-Type: application/json
 
 {
-  "type": "statement_item",
+  "type": "StatementItem",
   "data": {
     "account": "test_account",
     "statementItem": {
@@ -37,9 +38,9 @@ Content-Type: application/json
 
 ###
 
-### 4. Реєстрація нового захищеного Webhook в Monobank API
+### 4. Ручна реєстрація webhook у Monobank API (змінює живе налаштування)
 POST https://api.monobank.ua/personal/webhook
-X-Token: uOzgEn4Uot5Ceh6V86w7PNiYPG8aZ-h5url7-hOR_M6Q
+X-Token: {{monoApiToken}}
 Content-Type: application/json
 
 {
@@ -53,7 +54,7 @@ POST http://localhost:3000/monobank/{{monoSecret}}
 Content-Type: application/json
 
 {
-  "type": "statement_item",
+  "type": "StatementItem",
   "data": {
     "account": "test_account",
     "statementItem": {

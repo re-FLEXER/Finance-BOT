@@ -48,10 +48,10 @@ async function getMonthlyAnalyticsData() {
         getStatsData()
     ]);
 
-    const income = incomeAgg._sum.amount || 0;
-    const expense = expenseAgg._sum.amount || 0;
-    const savings = savingAgg._sum.amount || 0;
-    const delta = income - expense;
+    const income = Number(incomeAgg._sum.amount || 0);
+    const expense = Number(expenseAgg._sum.amount || 0);
+    const savings = Number(savingAgg._sum.amount || 0);
+    const delta = Math.round((income - expense) * 100) / 100;
 
     // 🤝 Борги рахуються за всю історію, щоб показати актуальний залишок.
     const [iOweAgg, payDebtAgg, oweMeAgg, getDebtAgg] = await Promise.all([
@@ -61,8 +61,8 @@ async function getMonthlyAnalyticsData() {
         prisma.transaction.aggregate({ _sum: { amount: true }, where: { type: 'get_debt', is_deleted: false } })
     ]);
 
-    const myDebt = (iOweAgg._sum.amount || 0) - (payDebtAgg._sum.amount || 0); // Скільки я винен
-    const debtToMe = (oweMeAgg._sum.amount || 0) - (getDebtAgg._sum.amount || 0); // Скільки мені винні
+    const myDebt = Math.max(0, Math.round((Number(iOweAgg._sum.amount || 0) - Number(payDebtAgg._sum.amount || 0)) * 100) / 100); // Скільки я винен
+    const debtToMe = Math.max(0, Math.round((Number(oweMeAgg._sum.amount || 0) - Number(getDebtAgg._sum.amount || 0)) * 100) / 100); // Скільки мені винні
 
     const cardBalance = globalStats.personalBalance;
     const cashBalance = globalStats.cashBalance;
@@ -95,15 +95,15 @@ async function getMonthlyAnalyticsData() {
     // 🗂️ Зводимо попередні суми за назвою категорії для швидкого зіставлення.
     const prevMap = {};
     previousTopCategories.forEach(item => {
-        prevMap[item.category] = item._sum.amount || 0;
+        prevMap[item.category] = Number(item._sum.amount || 0);
     });
 
     // 📉 Додаємо до поточного рейтингу різницю та відсоток зміни проти минулого місяця.
     const topCategoriesWithTrend = currentTopCategories.map(item => {
         const catName = item.category;
-        const currentAmount = item._sum.amount || 0;
+        const currentAmount = Number(item._sum.amount || 0);
         const previousAmount = prevMap[catName] || 0;
-        const diff = currentAmount - previousAmount;
+        const diff = Math.round((currentAmount - previousAmount) * 100) / 100;
 
         return {
             category: catName,

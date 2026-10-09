@@ -6,11 +6,13 @@ const prisma = new PrismaClient();
  * Перераховує залишки, заощадження, борги й капітал за активними записами.
  * @returns {Promise<object>} Сукупні показники особистих фінансів і проєктів.
  */
-async function getStatsData() {
-    const allTransactions = await prisma.transaction.findMany({
+async function getStatsData(client = prisma) {
+    const allTransactions = await client.transaction.findMany({
         where: { is_deleted: false }
     });
 
+    // Усі проміжні розрахунки ведемо в цілих копійках, щоб сума Float/Decimal
+    // значень не накопичувала похибку двійкової арифметики.
     let initBalance = 0;
     let initSaving = 0;
     let pIncome = 0, pExpense = 0, pSaving = 0, pWithdraw = 0, wIncome = 0, wExpense = 0;
@@ -21,72 +23,86 @@ async function getStatsData() {
     let cashBalance = 0;
 
     allTransactions.forEach(t => {
+        const amount = Math.round(Number(t.amount) * 100);
         const source = t.source || 'card';
 
         if (t.type === 'init_balance') {
-            initBalance += t.amount;
-            cardBalance += t.amount;
+            initBalance += amount;
+            cardBalance += amount;
         } else if (t.type === 'init_saving') {
-            initSaving += t.amount;
+            initSaving += amount;
         } else if (t.type === 'transfer') {
             if (source === 'card' && t.toSource === 'cash') {
-                cardBalance -= t.amount;
-                cashBalance += t.amount;
+                cardBalance -= amount;
+                cashBalance += amount;
             } else if (source === 'cash' && t.toSource === 'card') {
-                cashBalance -= t.amount;
-                cardBalance += t.amount;
+                cashBalance -= amount;
+                cardBalance += amount;
             }
         } else if (t.type === 'withdraw_saving') {
-            pWithdraw += t.amount;
-            cardBalance += t.amount;
+            pWithdraw += amount;
+            cardBalance += amount;
         } else if (t.workspace === 'Проєкт') {
             if (t.type === 'income') {
-                wIncome += t.amount;
-                if (source === 'cash') cashBalance += t.amount; else cardBalance += t.amount;
+                wIncome += amount;
+                if (source === 'cash') cashBalance += amount; else cardBalance += amount;
             }
             if (t.type === 'expense') {
-                wExpense += t.amount;
-                if (source === 'cash') cashBalance -= t.amount; else cardBalance -= t.amount;
+                wExpense += amount;
+                if (source === 'cash') cashBalance -= amount; else cardBalance -= amount;
             }
         } else {
             if (t.type === 'income') {
-                pIncome += t.amount;
-                if (source === 'cash') cashBalance += t.amount; else cardBalance += t.amount;
+                pIncome += amount;
+                if (source === 'cash') cashBalance += amount; else cardBalance += amount;
             }
             if (t.type === 'expense') {
-                pExpense += t.amount;
-                if (source === 'cash') cashBalance -= t.amount; else cardBalance -= t.amount;
+                pExpense += amount;
+                if (source === 'cash') cashBalance -= amount; else cardBalance -= amount;
             }
             if (t.type === 'saving') {
-                pSaving += t.amount;
-                if (source === 'cash') cashBalance -= t.amount; else cardBalance -= t.amount;
+                pSaving += amount;
+                if (source === 'cash') cashBalance -= amount; else cardBalance -= amount;
             }
-            if (t.type === 'i_owe') iOweTotal += t.amount;
+            if (t.type === 'i_owe') iOweTotal += amount;
             if (t.type === 'pay_debt') {
-                payDebtTotal += t.amount;
-                cardBalance -= t.amount;
+                payDebtTotal += amount;
+                cardBalance -= amount;
             }
             if (t.type === 'owe_me') {
-                oweMeTotal += t.amount;
-                cardBalance -= t.amount;
+                oweMeTotal += amount;
+                cardBalance -= amount;
             }
             if (t.type === 'get_debt') {
-                getDebtTotal += t.amount;
-                cardBalance += t.amount;
+                getDebtTotal += amount;
+                cardBalance += amount;
             }
         }
     });
 
     const workProfit = wIncome - wExpense;
-    const currentIOwe = iOweTotal - payDebtTotal;
-    const currentOweMe = oweMeTotal - getDebtTotal;
+    const currentIOwe = Math.max(0, iOweTotal - payDebtTotal);
+    const currentOweMe = Math.max(0, oweMeTotal - getDebtTotal);
     const totalSavings = initSaving + pSaving - pWithdraw;
-    const totalCapital = cardBalance + cashBalance + totalSavings;
+    const totalCapital = cardBalance + cashBalance + totalSavings + currentOweMe - currentIOwe;
+    const toMoney = cents => cents / 100;
 
     return {
-        initBalance, pIncome, pExpense, pSaving: totalSavings, wIncome, wExpense,
-        currentIOwe, currentOweMe, workProfit, personalBalance: cardBalance, totalCapital,
-        iOweTotal, payDebtTotal, cardBalance, cashBalance
+        initBalance: toMoney(initBalance),
+        pIncome: toMoney(pIncome),
+        pExpense: toMoney(pExpense),
+        pSaving: toMoney(totalSavings),
+        wIncome: toMoney(wIncome),
+        wExpense: toMoney(wExpense),
+        currentIOwe: toMoney(currentIOwe),
+        currentOweMe: toMoney(currentOweMe),
+        workProfit: toMoney(workProfit),
+        personalBalance: toMoney(cardBalance),
+        totalCapital: toMoney(totalCapital),
+        iOweTotal: toMoney(iOweTotal),
+        payDebtTotal: toMoney(payDebtTotal),
+        cardBalance: toMoney(cardBalance),
+        cashBalance: toMoney(cashBalance)
     };
 }
 

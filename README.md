@@ -71,14 +71,16 @@ flowchart TD
 - Бот визначає дію: записати операцію, звірити баланс або відповісти як фінансовий радник.
 - `/withdraw <сума> [опис]` переносить суму зі збережень на картку: залишок картки зростає, заощадження зменшуються, загальний капітал не змінюється.
 - Вебхук Monobank перевіряє `MONO_SECRET` і `monoId`. Для звичайної транзакції спершу створюється базовий запис, після чого надсилається `200 OK`; AI-класифікація працює у фоні через `setImmediate`, оновлює категорію/простір і надсилає повідомлення з кнопкою `[✏️ Уточнити]`. Зняття готівки та комісія записуються одним атомарним пакетом.
-- `stats-engine.js` є єдиним джерелом розрахунків капіталу, залишку картки, готівки, заощаджень і боргів для `/stats`, `/monthly` та синхронізації.
+- `stats-engine.js` є єдиним джерелом розрахунків залишків і чистого капіталу: картка + готівка + заощадження + кошти до повернення − власні борги.
 - Gemini є основним ШІ-провайдером, Groq — резервним. Помилки Gemini, зокрема `429` і `503`, журналюються перед перемиканням.
 - Prisma зберігає операції, історію розмови й відкладені звіти у PostgreSQL; JSON-бекапи включають усі таблиці та soft-deleted записи.
 
 ## Нові можливості v4.6
 
 - ⚡ **Асинхронний Save-First вебхук Monobank:** базова транзакція записується до відповіді `200 OK`, після чого AI збагачує її у фоні; це запобігає повторним доставкам через затримки AI.
-- 🧮 **Уніфікований Engine статистики (`stats-engine.js`):** спільний модуль для `/stats`, `/monthly` і команд синхронізації усуває розбіжності балансу й капіталу; суми округлюються до копійок.
+- 🧮 **Уніфікований Engine статистики (`stats-engine.js`):** спільний модуль для `/stats`, `/monthly` і команд синхронізації; проміжні суми рахуються в копійках, чистий капітал враховує дебіторську заборгованість і власні борги.
+- 💱 **Monobank:** валюту рахунку конвертуємо в UAH за поточним курсом `rateCross` (або середнім курсом купівлі/продажу), кешованим на 5 хвилин; дата операції береться з `statementItem.time`.
+- 🔐 **Telegram webhook:** окремий `TELEGRAM_WEBHOOK_SECRET` перевіряється в заголовку `X-Telegram-Bot-Api-Secret-Token`; фінансові команди працюють лише в приватному чаті власника.
 - 🌍 **Часовий пояс `TZ=Europe/Kyiv`:** локальний час процесу та всі Cron-задачі використовують київський часовий пояс незалежно від UTC-настройок сервера.
 - 🛠️ **Суворий парсинг сум (`parseAmount`):** підтримує кредитні від’ємні залишки в `/sync`, `/setbalance`, `/setsavings`, відхиляє текстове сміття на кшталт `12abc` та округлює суми до двох знаків.
 - 🤖 **Гнучкий AI-failover та контекстна валідація:** опціональний JSON-режим для структурованих відповідей, вільний текст для щоденного звіту та whitelist типів/просторів для уточнень і Monobank.
@@ -172,11 +174,15 @@ DIRECT_URL=postgresql://user:password@host:5432/database?schema=public
 GEMINI_API_KEY=your_gemini_api_key
 GROQ_API_KEY=your_groq_api_key
 MONO_SECRET=use_a_unique_random_secret_of_at_least_32_characters
+TELEGRAM_WEBHOOK_SECRET=use_a_second_unique_random_secret_of_at_least_32_characters
 TZ=Europe/Kyiv
 PORT=3000
+# Необов'язково: лише для ручного прикладу реєстрації Monobank webhook у test-api.http
+MONO_API_TOKEN=your_monobank_personal_api_token
 ```
 
 `MONO_SECRET` згенеруйте як випадкове значення щонайменше 32 символи, наприклад `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`. Не використовуйте буквальний placeholder із прикладу.
+`TELEGRAM_WEBHOOK_SECRET` згенеруйте окремо таким самим способом. Не використовуйте один секрет для Telegram і Monobank. `MONO_API_TOKEN` потрібний лише якщо вручну виконуєте запит реєстрації webhook-а у `test-api.http`; ніколи не додавайте його до Git.
 
 | Змінна | Призначення |
 | --- | --- |
@@ -187,6 +193,8 @@ PORT=3000
 | `GEMINI_API_KEY` | API key основного AI-провайдера. |
 | `GROQ_API_KEY` | API key резервного AI-провайдера. |
 | `MONO_SECRET` | Випадковий URL-секрет Monobank webhook, мінімум 32 символи. |
+| `TELEGRAM_WEBHOOK_SECRET` | Окремий секрет заголовка Telegram webhook, мінімум 32 символи; потрібний на Render. |
+| `MONO_API_TOKEN` | Необов'язковий особистий API token Monobank тільки для ручного REST Client запиту. |
 | `TZ` | Часовий пояс процесу для обчислення дат і Cron-задач; застосунок встановлює `Europe/Kyiv`. |
 | `PORT` | HTTP-порт; за замовчуванням `3000`, Render задає автоматично. |
 | `RENDER_EXTERNAL_URL` | Render public URL; якщо заданий, бот реєструє Telegram webhook під час запуску. |
@@ -202,11 +210,13 @@ npx prisma migrate deploy
 npm start
 ```
 
-Health check: `http://localhost:3000/ping`, очікувана відповідь — `OK`. HTTP-приклади webhook-ів є у `test-api.http`; тестовий Monobank ID з префіксом `test_` не записується в БД. REST Client підставляє `MONO_SECRET` із локального `.env`.
+Health check: `http://localhost:3000/ping`; `200 OK` означає, що PostgreSQL відповідає і production Telegram webhook налаштовано, інакше повертається `503`. HTTP-приклади webhook-ів є у `test-api.http`; тестовий Monobank ID з префіксом `test_` не записується в БД. REST Client підставляє `MONO_SECRET` і за потреби `MONO_API_TOKEN` із локального `.env`.
 
 ### Міграції PostgreSQL
 
 Для порожньої PostgreSQL бази `npx prisma migrate deploy` створює схему з baseline і додає unique index `Transaction_monoId_key`.
+
+Міграція `20261008000100_amount_decimal` переводить `Transaction.amount` із `DOUBLE PRECISION` у `DECIMAL(20,2)` та округлює вже збережені значення до копійок. Перед застосуванням до наявної БД зробіть backup; після deploy виконайте `npx prisma generate` перед запуском застосунку.
 
 Для раніше створеної БД спочатку зробіть backup і переконайтеся, що таблиці та колонки відповідають `prisma/schema.prisma`. Якщо схема вже існує, одноразово позначте baseline застосованим і застосуйте наступні міграції:
 
@@ -222,9 +232,9 @@ npx prisma migrate deploy
 1. Створіть Web Service із коренем репозиторію та PostgreSQL database.
 2. Встановіть Build Command: `npm ci && npx prisma generate && npx prisma migrate deploy`.
 3. Встановіть Start Command: `npm start` і Health Check Path: `/ping`.
-4. Додайте `BOT_TOKEN`, `MY_CHAT_ID`, `DATABASE_URL`, `DIRECT_URL`, `GEMINI_API_KEY`, `GROQ_API_KEY`, `MONO_SECRET` і `TZ=Europe/Kyiv` у Render Environment.
+4. Додайте `BOT_TOKEN`, `MY_CHAT_ID`, `DATABASE_URL`, `DIRECT_URL`, `GEMINI_API_KEY`, `GROQ_API_KEY`, `MONO_SECRET`, `TELEGRAM_WEBHOOK_SECRET` і `TZ=Europe/Kyiv` у Render Environment.
 5. Для наявної БД виконайте одноразовий baseline resolve до першого deploy з міграціями; Render build не повинен виконувати його автоматично.
-6. Переконайтеся, що Telegram webhook зареєстрований на `https://<service>.onrender.com/telegram/<BOT_TOKEN>`.
+6. Переконайтеся, що Telegram webhook зареєстрований на `https://<service>.onrender.com/telegram/<BOT_TOKEN>` з окремим secret token у заголовку.
 7. У Monobank задайте webhook URL `https://<service>.onrender.com/monobank/<MONO_SECRET>`.
 
 ## Фонові задачі
@@ -243,14 +253,14 @@ Cron-задачі працюють у процесі Node.js за часовим
 ## Безпека та посилення захисту
 
 - **Telegram allowlist:** middleware звіряє `ctx.from.id` з `MY_CHAT_ID`; сторонні користувачі не отримують доступ до команд. Сповіщення про відмову та alert cooldown не замінюють rate limiting на рівні edge/proxy.
-- **Telegram webhook:** шлях містить `BOT_TOKEN`, але окремий Telegram `secret_token` header не налаштований. Не публікуйте URL webhook і використовуйте HTTPS.
-- **Monobank webhook:** `MONO_SECRET` має щонайменше 32 символи та порівнюється constant-time. Секрет є bearer credential у URL; URL може потрапити до access logs. Monobank-підпис тіла в цьому endpoint не перевіряється, тому застосовуйте унікальний секрет і ротайте його при витоку. Після перевірки payload і дубля звичайна транзакція спершу зберігається в БД, а `200 OK` надсилається до AI-аналізу; категоризація та Telegram-сповіщення виконуються асинхронно.
-- **Webhook payload:** endpoint перевіряє наявність ID та числової суми; Express JSON parser використовує стандартний ліміт розміру body.
+- **Telegram webhook:** перевіряються і секретний шлях, і `X-Telegram-Bot-Api-Secret-Token`; команди приймаються тільки від власника в приватному чаті. Не публікуйте URL webhook.
+- **Monobank webhook:** `MONO_SECRET` має щонайменше 32 символи та порівнюється constant-time; GET-маршрут відповідає `200` для перевірки URL під час реєстрації. Секрет є bearer credential у URL; URL може потрапити до access logs. Monobank-підпис тіла в цьому endpoint не перевіряється, тому застосовуйте унікальний секрет і ротайте його при витоку. Після перевірки payload і дубля звичайна транзакція спершу зберігається в БД, а `200 OK` надсилається до AI-аналізу; категоризація та Telegram-сповіщення виконуються асинхронно.
+- **Webhook payload:** перевіряються ID, ціла сума в мінорних одиницях, валюта, дата й розмір тексту; для іноземної валюти застосовується курс Monobank, доступний під час обробки webhook-а.
 - **Дедуплікація:** унікальний `monoId` захищає від повторних/конкурентних webhook deliveries. Зняття й комісія записуються в одній Prisma-транзакції.
 - **HTML:** динамічні значення, що вставляються в Telegram HTML, проходять `escapeHtml`.
 - **Бекапи й CSV:** CSV-поля проходять `sanitizeForCsv`; JSON-бекап зберігає повні записи усіх трьох таблиць, включно з `toSource`, `monoId`, `batchId` та `is_deleted`. Файли містять приватні фінансові дані — обмежте доступ до Telegram-чату та завантажених копій.
 - **AI-провайдери:** текст повідомлень, історія радника й агреговані фінансові метрики можуть надсилатися до Gemini або Groq. Не передавайте дані, які не можна обробляти цими провайдерами.
-- **Секрети й Git:** `.gitignore` виключає `.env`, `.zip`-архіви та SQLite-артефакти. Ротуйте всі ключі й токени (`BOT_TOKEN`, `GEMINI_API_KEY`, `GROQ_API_KEY`, `MONO_SECRET`, облікові дані БД), якщо вони потрапили до Git, логів або стороннього доступу.
+- **Секрети й Git:** `.gitignore` виключає `.env`, `.zip`-архіви та SQLite-артефакти. Ротуйте всі ключі й токени (`BOT_TOKEN`, `GEMINI_API_KEY`, `GROQ_API_KEY`, `MONO_SECRET`, `TELEGRAM_WEBHOOK_SECRET`, `MONO_API_TOKEN`, облікові дані БД), якщо вони потрапили до Git, логів або стороннього доступу.
 - **Destructive actions:** перед `/reset` бот створює та надсилає JSON-дамп усіх таблиць у приватний чат; очищення виконується лише після успішного надсилання копії.
 
 ## Перевірки
