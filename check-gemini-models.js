@@ -36,11 +36,11 @@ async function checkModels() {
     }
 
     // 🧪 Перевіряємо не лише доступ до каталогу, а й реальну генерацію тексту.
-    console.log('\nПеревіряю реальний виклик gemini-3.5-flash...');
+    console.log('\nПеревіряю реальний виклик gemini-3.6-flash...');
     try {
         const { GoogleGenerativeAI } = require('@google/generative-ai');
         const genAI = new GoogleGenerativeAI(apiKey);
-        const model = genAI.getGenerativeModel({ model: 'gemini-3.5-flash' }, { timeout: 30000 });
+        const model = genAI.getGenerativeModel({ model: 'gemini-3.6-flash' }, { timeout: 30000 });
         const result = await model.generateContent('Відповідай одним словом: працює.');
         console.log('✅ Gemini виклик успішний:', result.response.text());
     } catch (error) {

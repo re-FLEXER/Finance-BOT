@@ -33,15 +33,15 @@ async function generateTextWithFallback(prompt, { json = true } = {}) {
     // 🤖 Спочатку звертаємося до Gemini; помилку фіксуємо перед переходом на Groq.
     try {
         const modelConfig = {
-            model: 'gemini-3.5-flash',
+            model: 'gemini-3.6-flash',
             ...(json ? { generationConfig: { responseMimeType: 'application/json' } } : {})
         };
         const model = genAI.getGenerativeModel(modelConfig, GEMINI_REQUEST_OPTIONS);
         const result = await model.generateContent(prompt);
         rawText = result.response.text();
-        providerName = 'Gemini (3.5 Flash)';
+        providerName = 'Gemini (3.6 Flash)';
     } catch (geminiErr) {
-        console.error('🚨 [AI FALLBACK] Помилка виклику Gemini (gemini-3.5-flash):', {
+        console.error('🚨 [AI FALLBACK] Помилка виклику Gemini (gemini-3.6-flash):', {
             message: geminiErr.message,
             status: geminiErr.status || geminiErr.statusCode || 'N/A',
             stack: geminiErr.stack
@@ -104,15 +104,15 @@ async function generateChatTextWithFallback(systemInstruction, history, userText
 
     try {
         const model = genAI.getGenerativeModel({
-            model: 'gemini-3.5-flash',
+            model: 'gemini-3.6-flash',
             systemInstruction
         }, GEMINI_REQUEST_OPTIONS);
         const chat = model.startChat({ history });
         const result = await chat.sendMessage(userText);
         rawText = result.response.text();
-        providerName = 'Gemini (3.5 Flash)';
+        providerName = 'Gemini (3.6 Flash)';
     } catch (geminiErr) {
-        console.error('🚨 [AI FALLBACK] Помилка виклику Gemini (gemini-3.5-flash):', {
+        console.error('🚨 [AI FALLBACK] Помилка виклику Gemini (gemini-3.6-flash):', {
             message: geminiErr.message,
             status: geminiErr.status || geminiErr.statusCode || 'N/A',
             stack: geminiErr.stack
