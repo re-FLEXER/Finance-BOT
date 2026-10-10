@@ -1,3 +1,6 @@
+// ==========================================
+// 🗂️ ЛОКАЛІЗАЦІЯ ДАНИХ ДЛЯ ЕКСПОРТУ
+// ==========================================
 // Словник перекладу типів транзакцій
 const TYPE_TRANSLATIONS = {
     income: '🟢 Дохід',
@@ -18,7 +21,10 @@ const SOURCE_TRANSLATIONS = {
     cash: '💵 Готівка'
 };
 
-// 🛡 Захист від CSV Formula Injection
+// ==========================================
+// 🛡️ ОЧИЩЕННЯ ТА ЕКРАНУВАННЯ CSV-ЗНАЧЕНЬ
+// ==========================================
+// Захищаємо текстові поля від виконання формул у табличних редакторах.
 function sanitizeForCsv(value) {
     if (typeof value !== 'string') return value;
     const dangerousChars = ['=', '+', '-', '@'];
@@ -35,6 +41,9 @@ function csvTextCell(value) {
     return `"${safeValue.replace(/"/g, '""')}"`;
 }
 
+// ==========================================
+// 📄 ФОРМУВАННЯ CSV-ЗВІТУ З ТРАНЗАКЦІЙ
+// ==========================================
 /**
  * Формує CSV-стрінг із транзакціями
  * @param {Array} transactions - Масив об'єктів транзакцій з БД
@@ -75,6 +84,9 @@ function generateCsvReport(transactions) {
     return '\uFEFF' + csvContent; // \uFEFF додає BOM для коректного відображення кирилиці в Excel
 }
 
+// ==========================================
+// 💾 СТВОРЕННЯ ПОВНОГО JSON-БЕКАПУ
+// ==========================================
 /**
  * Формує повний JSON-дамп таблиць бази даних, зберігаючи всі передані поля.
  * @param {{Transaction: Array, ChatHistory: Array, ReportQueue: Array}} tables — записи моделей Prisma.
@@ -87,6 +99,7 @@ function generateDatabaseJsonBackup(tables) {
     }, (key, value) => typeof value === 'bigint' ? value.toString() : value, 2);
 }
 
+// 📦 Експортуємо функції формування звітів і резервних копій.
 module.exports = {
     sanitizeForCsv,
     generateCsvReport,

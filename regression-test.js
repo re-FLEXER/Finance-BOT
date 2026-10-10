@@ -1,6 +1,10 @@
 const load = require('./test-harness');
 const assert = require('assert');
 let pass = 0, fail = 0; const failures = [];
+
+// ==========================================
+// 🧰 ТЕСТОВІ ПОМІЧНИКИ ТА ПІДГОТОВКА СЦЕНАРІЇВ
+// ==========================================
 const t = async (name, fn) => { try { await fn(); pass++; console.log('  ✅', name); } catch (e) { fail++; failures.push(name); console.log('  ❌', name, '\n       →', String(e.message).split('\n')[0]); } };
 const mkAi = (script) => ({
     generateTextWithFallback: async (p, o) => { const r = script(p, o); if (r instanceof Error) throw r; return { text: typeof r === 'string' ? r : JSON.stringify(r), provider: 'mock' }; },
@@ -14,9 +18,12 @@ const mono = (id, amount, description, extra = {}) => ({ params: { secret: 'm'.r
 const intent = (obj) => mkAi((p) => (/класифікатор намірів/.test(p) ? obj : {}));
 
 (async () => {
+  // ==========================================
+  // 💰 A. ПЕРЕВІРКА ФОРМАТУ ГРОШОВИХ СУМ
+  // ==========================================
   console.log('\nA) Введення сум');
-  { const { handlers, prisma, mkCtx } = load({ ai: mkAi(() => ({})) });
-    for (const [cmd, ex] of [['/sync 358,36'], ['/setbalance 450,60'], ['/debt 12,5 Петро'], ['/paydebt 100,5'], ['/withdraw 10,5']]) {
+  { const { handlers, mkCtx } = load({ ai: mkAi(() => ({})) });
+    for (const cmd of ['/sync 358,36', '/setbalance 450,60', '/debt 12,5 Петро', '/paydebt 100,5', '/withdraw 10,5']) {
       await t(`${cmd} (кома, як у підказці бота)`, async () => { const c = mkCtx(cmd); await handlers.commands[cmd.slice(1).split(' ')[0]](c); assert(!/Формат/.test(c.replies[0] || ''), 'відхилено: ' + (c.replies[0] || '').slice(0, 60)); });
     }
     await t('/sync 358.36 (крапка) працює', async () => { const c = mkCtx('/sync 358.36'); await handlers.commands.sync(c); assert(!/Формат/.test(c.replies[0] || '')); });
@@ -24,11 +31,14 @@ const intent = (obj) => mkAi((p) => (/класифікатор намірів/.t
     await t('/debt -5 і 12abc відхиляються', async () => { const a = mkCtx('/debt -5 X'); await handlers.commands.debt(a); const b = mkCtx('/debt 12abc X'); await handlers.commands.debt(b); assert(/Формат/.test(a.replies[0]) && /Формат/.test(b.replies[0])); });
   }
 
+  // ==========================================
+  // 🛡️ B. БІЛИЙ СПИСОК І TELEGRAM WEBHOOK
+  // ==========================================
   console.log('\nB) Whitelist / Telegram webhook');
   { const { handlers, handleUpdateCalls } = load({ ai: mkAi(() => ({})) });
     const route = handlers.post['/telegram/tok'];
     const r1 = res(); route({ body: { u: 1 }, get: () => undefined }, r1);
-    const r2 = res(); route({ body: { u: 2 }, get: (h) => 't'.repeat(40) }, r2); await tick();
+    const r2 = res(); route({ body: { u: 2 }, get: () => 't'.repeat(40) }, r2); await tick();
     const r3 = res(); route({ body: { u: 3 }, get: () => 'x'.repeat(40) }, r3);
     await t('без заголовка → 403', () => assert.strictEqual(r1.code, 403));
     await t('невірний секрет → 403', () => assert.strictEqual(r3.code, 403));
@@ -44,8 +54,11 @@ const intent = (obj) => mkAi((p) => (/класифікатор намірів/.t
     await t('[попередження, а не баг] без TELEGRAM_WEBHOOK_SECRET усі апдейти Telegram → 403', () => assert.strictEqual(r.code, 403));
   }
 
+  // ==========================================
+  // 🏦 C. MONOBANK: ВАЛІДАЦІЯ ТА ІДЕМПОТЕНТНІСТЬ
+  // ==========================================
   console.log('\nC) Вебхук Monobank');
-  { const { handlers, prisma, sent } = load({ ai: mkAi(() => ({ type: 'expense', category: 'Продукти', workspace: 'Особисте' })) });
+  { const { handlers, prisma } = load({ ai: mkAi(() => ({ type: 'expense', category: 'Продукти', workspace: 'Особисте' })) });
     const r = res(); await handlers.post[MONO](mono('a1', -25000, 'Сільпо'), r); await tick();
     await t('звичайна витрата: 200, запис, createdAt=час події банку', () => { const row = prisma.transaction.rows.find(x => x.monoId === 'a1'); assert.strictEqual(r.code, 200); assert.strictEqual(row.category, 'Продукти'); assert.strictEqual(row.createdAt.getTime(), 1760000000000); assert.strictEqual(row.amount, 250); });
     const r2 = res(); await handlers.post[MONO](mono('a1', -25000, 'Сільпо'), r2);
@@ -87,11 +100,14 @@ const intent = (obj) => mkAi((p) => (/класифікатор намірів/.t
     await t('зарахування «депозит» відкидається', () => assert(!prisma.transaction.rows.some(x => x.monoId === 'd4')));
   }
   { // паралельні дублі (Monobank ретрай під час AI)
-    const { handlers, prisma } = load({ ai: mkAi(() => new Promise(() => {}) && ({})) });
+    const { handlers, prisma } = load({ ai: mkAi(() => ({})) });
     const rs = [res(), res(), res()]; await Promise.all(rs.map(r => handlers.post[MONO](mono('e1', -500, 'Кава'), r))); await tick();
     await t('3 одночасні однакові вебхуки → 1 запис, усі 200', () => { assert.strictEqual(prisma.transaction.rows.filter(x => x.monoId === 'e1').length, 1); assert(rs.every(r => r.code === 200), rs.map(r => r.code).join()); });
   }
 
+  // ==========================================
+  // 💬 D. РОЗБІР ТЕКСТУ Й БЕЗПЕЧНЕ СТВОРЕННЯ ОПЕРАЦІЙ
+  // ==========================================
   console.log('\nD) Текстовий ввід');
   { const { handlers, prisma, mkCtx } = load({ ai: intent({ isTransaction: true, intent: 'TRANSACTION', transactions: [{ amount: 'abc', type: 'expense', category: 'Кава' }] }) });
     const c = mkCtx('кава'); await handlers.on.text(c);
@@ -106,10 +122,13 @@ const intent = (obj) => mkAi((p) => (/класифікатор намірів/.t
     await t('pay_debt з workspace «Проєкт» → «Особисте» (stats ігнорує борги в Проєкті)', () => assert.strictEqual(prisma.transaction.rows[0].workspace, 'Особисте')); }
   { const { handlers, prisma, mkCtx } = load({ ai: intent({ isTransaction: true, intent: 'TRANSACTION', transactions: [{ amount: 10, type: 'bogus', category: 'X' }] }) });
     await handlers.on.text(mkCtx('щось')); await t('невідомий тип не перетворюється мовчки на витрату', () => assert(!prisma.transaction.rows[0] || prisma.transaction.rows[0].type !== 'expense')); }
-  { const { handlers, prisma, mkCtx } = load({ ai: intent({ intent: 'SYNC', amount: '358,36' }) });
+  { const { handlers, mkCtx } = load({ ai: intent({ intent: 'SYNC', amount: '358,36' }) });
     const c = mkCtx('на карті 358,36'); await handlers.on.text(c);
     await t('SYNC від AI з рядком «358,36»', () => assert(!/Не вдалося перевірити/.test(c.replies[0] || ''), c.replies[0])); }
 
+  // ==========================================
+  // ✏️ E. УТОЧНЕННЯ ТА РЕДАГУВАННЯ ОПЕРАЦІЙ
+  // ==========================================
   console.log('\nE) «Уточнити»');
   { let reply = {};
     const { handlers, prisma, mkCtx } = load({ ai: mkAi(() => reply) });
@@ -128,6 +147,9 @@ const intent = (obj) => mkAi((p) => (/класифікатор намірів/.t
     await edit(2, 'це кава'); await t('edit: переказ не можна перетворити на витрату', () => assert.strictEqual(prisma.transaction.rows[1].type, 'transfer', 'type=' + prisma.transaction.rows[1].type));
   }
 
+  // ==========================================
+  // 📊 F. СТАТИСТИКА, ЗБЕРЕЖЕННЯ ТА ТОЧНІСТЬ DECIMAL
+  // ==========================================
   console.log('\nF) Статистика / /setsavings / Decimal');
   { const { handlers, prisma, mkCtx } = load({ ai: mkAi(() => ({})) });
     await handlers.commands.setsavings(mkCtx('/setsavings 5000')); await handlers.commands.withdraw(mkCtx('/withdraw 500')); await handlers.commands.setsavings(mkCtx('/setsavings 5000'));
@@ -143,10 +165,16 @@ const intent = (obj) => mkAi((p) => (/класифікатор намірів/.t
     await t('чистий капітал = картка(700) + мені винні(300) − я винен(100) = 900', () => assert.strictEqual(s.totalCapital, 900, String(s.totalCapital)));
   }
 
+  // ==========================================
+  // 💚 G. ПЕРЕВІРКА ДОСТУПНОСТІ СЕРВЕРА
+  // ==========================================
   console.log('\nG) /ping');
   { const { handlers } = load({ ai: mkAi(() => ({})) });
     const r = res(); await handlers.get['/ping']({}, r); await t('/ping 200 коли БД жива і вебхук готовий', () => assert.strictEqual(r.code, 200)); }
 
+  // ==========================================
+  // 🧾 ПІДСУМОК ПРОГОНУ Й КОД ЗАВЕРШЕННЯ
+  // ==========================================
   console.log(`\nПідсумок: ${pass} пройшло, ${fail} впало`);
   if (failures.length) console.log('Впали:\n - ' + failures.join('\n - '));
   process.exit(fail ? 1 : 0);

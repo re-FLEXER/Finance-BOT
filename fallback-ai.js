@@ -5,6 +5,9 @@ const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 const GEMINI_REQUEST_OPTIONS = { timeout: 30000 };
 
+// ==========================================
+// ⏳ СПІЛЬНІ ДОПОМІЖНІ ФУНКЦІЇ ДЛЯ AI-ЗАПИТІВ
+// ==========================================
 /**
  * ⏳ Робить паузу перед наступною спробою запиту.
  * @param {number} ms — тривалість паузи в мілісекундах.
@@ -12,6 +15,9 @@ const GEMINI_REQUEST_OPTIONS = { timeout: 30000 };
  */
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// ==========================================
+// 🤖 ГЕНЕРАЦІЯ ТЕКСТУ З РЕЗЕРВНИМ ПРОВАЙДЕРОМ
+// ==========================================
 /**
  * 🤖 Запитує структуровану відповідь у Gemini та за помилки перемикається на Groq.
  * Санітар очищає обгортки розмітки й залишає зовнішній об'єкт JSON, якщо модель
@@ -82,6 +88,9 @@ async function generateTextWithFallback(prompt, { json = true } = {}) {
     };
 }
 
+// ==========================================
+// 💬 ДІАЛОГОВИЙ ЗАПИТ З ІСТОРІЄЮ ПОВІДОМЛЕНЬ
+// ==========================================
 /**
  * 💬 Веде розмову через Gemini та непомітно переходить на Groq у разі помилки.
  * @param {string} systemInstruction — спільні настанови для розмови.
@@ -135,6 +144,9 @@ async function generateChatTextWithFallback(systemInstruction, history, userText
     };
 }
 
+// ==========================================
+// 🔁 ПОВТОРНІ СПРОБИ ДЛЯ ТИМЧАСОВИХ ПОМИЛОК
+// ==========================================
 /**
  * 🔄 Повторює повний ланцюжок запитів до провайдерів після тимчасових збоїв.
  * @param {string} prompt — текст запиту для ШІ-провайдерів.
@@ -158,6 +170,7 @@ async function generateTextWithRetry(prompt, maxRetries = 5, delayMs = 12000, op
     }
 }
 
+// 📦 Публічні функції для одноразових, діалогових і повторюваних AI-запитів.
 module.exports = {
     generateTextWithFallback,
     generateChatTextWithFallback,

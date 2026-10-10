@@ -269,7 +269,7 @@ Cron-задачі працюють у процесі Node.js за часовим
 Lint production і тестових модулів:
 
 ```powershell
-npx eslint index.js fallback-ai.js export-helpers.js monthly-ai.js monthly-analytics.js stress-test.js check-gemini-models.js check-groq-models.js
+npx eslint index.js fallback-ai.js export-helpers.js monthly-ai.js monthly-analytics.js stats-engine.js regression-test.js test-harness.js stress-test.js check-gemini-models.js check-groq-models.js
 ```
 
 Локальні security-перевірки без запитів до БД та AI API:
@@ -291,6 +291,8 @@ node stress-test.js
 ```powershell
 node regression-test.js
 ```
+
+Набір перевіряє сценарії введення сум, доступу та webhook-ів, класифікації транзакцій, редагування, статистики й доступності сервера.
 
 Перевірка доступності моделей і реальний короткий запит до Gemini:
 

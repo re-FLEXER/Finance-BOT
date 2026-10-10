@@ -1,5 +1,8 @@
 require('dotenv').config();
 
+// ==========================================
+// 🔑 ПЕРЕВІРКА ДОСТУПУ ДО GROQ ТА СПИСКУ МОДЕЛЕЙ
+// ==========================================
 async function checkGroqModels() {
     const apiKey = process.env.GROQ_API_KEY;
     const url = 'https://api.groq.com/openai/v1/models';
@@ -11,6 +14,7 @@ async function checkGroqModels() {
         return;
     }
 
+    // 📚 Запитуємо каталог моделей із ключем Groq.
     try {
         const response = await fetch(url, {
             headers: {
@@ -33,4 +37,5 @@ async function checkGroqModels() {
     }
 }
 
+// 🚀 Запускаємо діагностику під час виконання скрипту.
 checkGroqModels();

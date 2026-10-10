@@ -1,5 +1,8 @@
 require('dotenv').config();
 
+// ==========================================
+// 🔑 ПЕРЕВІРКА ДОСТУПУ ДО GEMINI ТА СПИСКУ МОДЕЛЕЙ
+// ==========================================
 async function checkModels() {
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) {
@@ -12,6 +15,7 @@ async function checkModels() {
 
     console.log('Завантажую список доступних моделей від Google...');
 
+    // 📚 Отримуємо список моделей, доступних для переданого API-ключа.
     try {
         const response = await fetch(url, { signal: AbortSignal.timeout(30000) });
         const data = await response.json();
@@ -31,6 +35,7 @@ async function checkModels() {
         console.error('Помилка мережі під час отримання списку моделей:', error.message);
     }
 
+    // 🧪 Перевіряємо не лише доступ до каталогу, а й реальну генерацію тексту.
     console.log('\nПеревіряю реальний виклик gemini-3.5-flash...');
     try {
         const { GoogleGenerativeAI } = require('@google/generative-ai');
@@ -49,4 +54,5 @@ async function checkModels() {
     }
 }
 
+// 🚀 Запускаємо діагностику під час виконання скрипту.
 checkModels();

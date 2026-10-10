@@ -1,5 +1,8 @@
 const { prisma, getStatsData } = require('./stats-engine');
 
+// ==========================================
+// 📅 МЕЖІ ПОТОЧНОГО ТА ПОПЕРЕДНЬОГО МІСЯЦІВ
+// ==========================================
 /**
  * 📅 Обчислює повні календарні межі поточного та попереднього місяців.
  * Межі включають першу мить першого дня та останню мить останнього дня.
@@ -22,6 +25,9 @@ function getMonthRanges() {
     };
 }
 
+// ==========================================
+// 📊 ЗБІР МЕТРИК, БОРГІВ ТА ДИНАМІКИ КАТЕГОРІЙ
+// ==========================================
 /**
  * 📊 Збирає показники поточного місяця, залишки, борги та динаміку категорій.
  * Для кожної поточної категорії порівнює витрати з повним попереднім місяцем;
@@ -32,6 +38,7 @@ async function getMonthlyAnalyticsData() {
     const { currentMonth, previousMonth } = getMonthRanges();
 
     // 📊 Базові доходи, витрати та заощадження лише за поточний місяць.
+    // 📥 Паралельно читаємо місячні потоки та глобальний актуальний баланс.
     const [incomeAgg, expenseAgg, savingAgg, globalStats] = await Promise.all([
         prisma.transaction.aggregate({
             _sum: { amount: true },
@@ -54,6 +61,7 @@ async function getMonthlyAnalyticsData() {
     const delta = Math.round((income - expense) * 100) / 100;
 
     // 🤝 Борги рахуються за всю історію, щоб показати актуальний залишок.
+    // 🤝 Залишки боргів рахуємо за всією історією транзакцій.
     const [iOweAgg, payDebtAgg, oweMeAgg, getDebtAgg] = await Promise.all([
         prisma.transaction.aggregate({ _sum: { amount: true }, where: { type: 'i_owe', is_deleted: false } }),
         prisma.transaction.aggregate({ _sum: { amount: true }, where: { type: 'pay_debt', is_deleted: false } }),
@@ -69,6 +77,7 @@ async function getMonthlyAnalyticsData() {
     const totalCapital = globalStats.totalCapital;
 
     // 🏆 Десять найбільших категорій витрат поточного місяця.
+    // 🏆 Зіставляємо категорії витрат за поточний і попередній місяці.
     const currentTopCategories = await prisma.transaction.groupBy({
         by: ['category'],
         _sum: { amount: true },
@@ -131,6 +140,7 @@ async function getMonthlyAnalyticsData() {
     };
 }
 
+// 📦 Дані цього модуля використовуються аудитором і місячним звітом.
 module.exports = {
     getMonthlyAnalyticsData
 };

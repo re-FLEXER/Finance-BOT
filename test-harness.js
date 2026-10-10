@@ -1,6 +1,9 @@
 const Module = require('module');
 const path = require('path');
 
+// ==========================================
+// 🧮 МІНІМАЛЬНИЙ DECIMAL ДЛЯ ІЗОЛЬОВАНОГО ТЕСТОВОГО СЕРЕДОВИЩА
+// ==========================================
 class Decimal {
     constructor(v) { this.v = Number(v); }
     div(x) { return new Decimal(this.v / Number(x.v ?? x)); }
@@ -13,6 +16,9 @@ class Decimal {
 }
 Decimal.ROUND_HALF_UP = 4;
 
+// ==========================================
+// 🗄️ MOCK БАЗИ ДАНИХ І ТРАНЗАКЦІЙ PRISMA
+// ==========================================
 function makeDb() {
     const rows = []; let seq = 1;
     const match = (r, w = {}) => Object.entries(w).every(([k, v]) => {
@@ -47,6 +53,9 @@ function makeDb() {
     return prisma;
 }
 
+// ==========================================
+// 🧪 ПІДМІНА ЗАЛЕЖНОСТЕЙ ТА ЗАВАНТАЖЕННЯ ОБРОБНИКІВ
+// ==========================================
 module.exports = function load({ ai, env = {} }) {
     const handlers = { commands: {}, on: {}, actions: [], post: {}, get: {}, use: [] };
     const sent = [];
@@ -72,6 +81,7 @@ module.exports = function load({ ai, env = {} }) {
     for (const f of ['index.js', 'stats-engine.js', 'monthly-analytics.js']) delete require.cache[path.resolve('./' + f)];
     require('./index.js');
     Module._load = orig;
+    // 💬 Створюємо повторно використовуваний mock-контекст Telegram-команд.
     const mkCtx = (text, extra = {}) => ({ from: { id: 111 }, chat: { id: 111, type: 'private' }, message: { text }, replies: [],
         reply(m) { this.replies.push(String(m)); return Promise.resolve({ message_id: 1 }); }, replyWithHTML(m) { this.replies.push(String(m)); return Promise.resolve({ message_id: 1 }); },
         telegram: { editMessageText: async (...a) => { sent.push(['edit', ...a]); }, deleteMessage: async () => {}, sendDocument: async () => {} }, ...extra });

@@ -2,11 +2,15 @@ const { PrismaClient } = require('@prisma/client');
 
 const prisma = new PrismaClient();
 
+// ==========================================
+// 📊 ПЕРЕРАХУНОК БАЛАНСІВ І ЧИСТОГО КАПІТАЛУ
+// ==========================================
 /**
  * Перераховує залишки, заощадження, борги й капітал за активними записами.
  * @returns {Promise<object>} Сукупні показники особистих фінансів і проєктів.
  */
 async function getStatsData(client = prisma) {
+    // 📥 Завантажуємо лише активні записи; усі суми далі переводимо в копійки.
     const allTransactions = await client.transaction.findMany({
         where: { is_deleted: false }
     });
@@ -22,6 +26,7 @@ async function getStatsData(client = prisma) {
     let cardBalance = 0;
     let cashBalance = 0;
 
+    // 🧮 Розкладаємо транзакції на особисті/проєктні потоки та оновлюємо джерела коштів.
     allTransactions.forEach(t => {
         const amount = Math.round(Number(t.amount) * 100);
         const source = t.source || 'card';
@@ -80,6 +85,7 @@ async function getStatsData(client = prisma) {
         }
     });
 
+    // ⚖️ Виводимо чисті залишки, а потім переводимо копійки назад у гривні.
     const workProfit = wIncome - wExpense;
     const currentIOwe = Math.max(0, iOweTotal - payDebtTotal);
     const currentOweMe = Math.max(0, oweMeTotal - getDebtTotal);
@@ -106,4 +112,5 @@ async function getStatsData(client = prisma) {
     };
 }
 
+// 📦 Prisma-клієнт і спільний розрахунок для команд, аналітики та звітів.
 module.exports = { prisma, getStatsData };
